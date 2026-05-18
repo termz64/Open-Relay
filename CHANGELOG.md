@@ -1,5 +1,11 @@
 # Changelog
 
+## v4.5.3 — May 18, 2026
+
+### Bug Fixes
+- Attempted fix for "Sign In Failed" error when signing in with Microsoft Entra ID 
+- Fixed multiple crashes affecting streaming responses.
+
 ## v4.5.2 — May 18, 2026
 
 ### Bug Fixes

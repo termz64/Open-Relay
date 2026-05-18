@@ -402,53 +402,70 @@ actor StreamingPipeline {
         if fb > 0 && dcCount >= fb {
             // Tool/reasoning split — frozenContent is stable once fb stops advancing.
             // Reuse cached String instance (preserves COW pointer → downstream == is O(1)).
-            let fbIdx: String.Index
-            if _cachedFrozenContent.offset == fb, let cachedIdx = _cachedFrozenContent.splitIdx {
-                // Cache hit: reuse the stored index — O(1), no traversal from startIndex.
+            //
+            // NOTE: displayContent is a NEW String allocation every drain tick
+            // (built as String(full[..<endIdx]) in drainTick). A String.Index from
+            // a previous tick's displayContent is INVALID on the current one — using
+            // it causes a fatal range error / bad access crash. We therefore NEVER
+            // store or reuse a String.Index across ticks. Only the String VALUE of
+            // frozenContent is cached; the split index is always recomputed fresh.
+            let fbIdx = displayContent.index(displayContent.startIndex, offsetBy: fb)
+            if _cachedFrozenContent.offset == fb {
+                // Cache hit: reuse stored frozenContent String value (COW-stable).
                 frozenContent = _cachedFrozenContent.value
-                fbIdx = cachedIdx
             } else {
-                // Cache miss: compute index once and cache it alongside the string.
-                fbIdx = displayContent.index(displayContent.startIndex, offsetBy: fb)
+                // Cache miss: compute and store the frozen content slice.
                 frozenContent = String(displayContent[..<fbIdx])
-                _cachedFrozenContent = (fb, frozenContent, fbIdx)
+                _cachedFrozenContent = (fb, frozenContent, nil)
             }
-            // liveTail grows every tick — always a fresh slice using the cached fbIdx.
+            // liveTail grows every tick — always a fresh slice using the fresh fbIdx.
             liveTail = String(displayContent[fbIdx...])
 
             // Further split liveTail at prose boundary.
-            // liveTailFrozenProse is stable once prose stops advancing — cache it.
+            // liveTailFrozenProse (the stable portion) is cached by prose offset.
+            // NOTE: liveTail is a FRESH String allocation on every tick (it's built as
+            // String(displayContent[fbIdx...]) above). This means a String.Index from
+            // a previous tick's liveTail is NOT valid against the current tick's liveTail —
+            // using it would be undefined behaviour and cause fatal range errors / bad access.
+            // We therefore cache only the String VALUE of liveTailFrozenProse (which is
+            // stable once prose stops advancing) and always recompute the split index
+            // from liveTail.startIndex. O(relP) where relP is tiny (live tail is short).
             if prose > fb {
                 let relP = prose - fb
                 if liveTail.count >= relP {
-                    if _cachedLiveTailFrozenProse.offset == prose, let cachedSplit = _cachedLiveTailFrozenProse.splitIdx {
-                        // Cache hit: reuse stored index — O(1).
+                    // Always compute a fresh index against the CURRENT liveTail.
+                    let splitIdx = liveTail.index(liveTail.startIndex, offsetBy: relP)
+                    if _cachedLiveTailFrozenProse.offset == prose {
+                        // Cache hit: reuse stored liveTailFrozenProse String value (COW-stable).
                         liveTailFrozenProse = _cachedLiveTailFrozenProse.value
-                        liveTailLiveProse = String(liveTail[cachedSplit...])
                     } else {
-                        // Cache miss: compute index and cache.
-                        let splitIdx = liveTail.index(liveTail.startIndex, offsetBy: relP)
+                        // Cache miss: compute and store the frozen prose slice.
                         liveTailFrozenProse = String(liveTail[..<splitIdx])
-                        _cachedLiveTailFrozenProse = (prose, liveTailFrozenProse, splitIdx)
-                        liveTailLiveProse = String(liveTail[splitIdx...])
+                        _cachedLiveTailFrozenProse = (prose, liveTailFrozenProse, nil)
                     }
+                    liveTailLiveProse = String(liveTail[splitIdx...])
                     relProse = relP
                 }
             }
         } else if fb == 0 && prose > 0 && dcCount >= prose {
             // Pure-prose split (no tool/reasoning blocks).
             // pureFrozenProse is stable once prose stops advancing — cache it.
-            if _cachedPureFrozenProse.offset == prose, let cachedSplit = _cachedPureFrozenProse.splitIdx {
-                // Cache hit: reuse stored index — O(1), no traversal from startIndex.
+            //
+            // NOTE: displayContent is a NEW String allocation every drain tick.
+            // A String.Index from a previous tick's displayContent is INVALID on
+            // the current one — reusing it causes a fatal range error / bad access.
+            // We therefore NEVER store or reuse a String.Index across ticks.
+            // Only the String VALUE is cached; the split index is always fresh.
+            let splitIdx = displayContent.index(displayContent.startIndex, offsetBy: prose)
+            if _cachedPureFrozenProse.offset == prose {
+                // Cache hit: reuse stored pureFrozenProse String value (COW-stable).
                 pureFrozenProse = _cachedPureFrozenProse.value
-                pureLiveProse = String(displayContent[cachedSplit...])
             } else {
-                // Cache miss: compute index and cache.
-                let splitIdx = displayContent.index(displayContent.startIndex, offsetBy: prose)
+                // Cache miss: compute and store the frozen prose slice.
                 pureFrozenProse = String(displayContent[..<splitIdx])
-                _cachedPureFrozenProse = (prose, pureFrozenProse, splitIdx)
-                pureLiveProse = String(displayContent[splitIdx...])
+                _cachedPureFrozenProse = (prose, pureFrozenProse, nil)
             }
+            pureLiveProse = String(displayContent[splitIdx...])
         }
 
         let snap = StreamingSnapshot(

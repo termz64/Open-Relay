@@ -319,6 +319,11 @@ struct SSOWebViewRepresentable: UIViewRepresentable {
         ) {
             let nsError = error as NSError
             guard nsError.code != NSURLErrorCancelled else { return }
+            // Error 102 (WebKitErrorFrameLoadInterruptedByPolicyChange) is expected when
+            // the AppSSO extension (e.g. Microsoft Authenticator) intercepts a navigation
+            // to handle SSO locally. The extension succeeds and loads substitute data, so
+            // treating this as a fatal error would wrongly dismiss the WKWebView.
+            guard !(nsError.domain == "WebKitErrorDomain" && nsError.code == 102) else { return }
 
             state.isLoading = false
             state.error = error.localizedDescription
