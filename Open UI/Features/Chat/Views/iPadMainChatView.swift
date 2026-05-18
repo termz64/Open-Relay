@@ -652,6 +652,7 @@ struct iPadMainChatView: View {
                     group.addTask { await listViewModel.refreshIfStale() }
                     group.addTask { await listViewModel.folderViewModel.refreshFolders() }
                     group.addTask { await channelListVM.refreshChannels() }
+                    group.addTask { await dependencies.authViewModel.refreshBackendConfig() }
                 }
                 if let activeId = activeConversationId {
                     let vm = dependencies.activeChatStore.viewModel(for: activeId)
@@ -714,7 +715,17 @@ struct iPadSidebarContent: View {
     @AppStorage("sidebar_channels_expanded") private var channelsExpanded: Bool = true
     @AppStorage("sidebar_chats_expanded") private var chatsExpanded: Bool = true
     /// Tracks which time-group sub-sections are collapsed (e.g. "Pinned", "Today").
-    @State private var collapsedSections: Set<String> = []
+    @AppStorage("sidebar_collapsed_sections") private var collapsedSectionsRaw: String = ""
+
+    private var collapsedSections: Set<String> {
+        get {
+            let keys = collapsedSectionsRaw.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+            return Set(keys)
+        }
+        set {
+            collapsedSectionsRaw = newValue.sorted().joined(separator: ",")
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -741,6 +752,7 @@ struct iPadSidebarContent: View {
 
                     // Divider between folders and channels
                     let channelsEnabled = dependencies.authViewModel.featurePermissions.channels
+                        && (dependencies.authViewModel.backendConfig?.features?.enableChannels ?? true)
                     if (foldersEnabled && !folderVM.featureDisabled && !folderVM.folders.isEmpty) || (channelsEnabled && !channelListVM.channels.isEmpty) {
                         Rectangle()
                             .fill(theme.textTertiary.opacity(0.12))
@@ -1381,8 +1393,13 @@ struct iPadSidebarContent: View {
         let isCollapsed = collapsedSections.contains(sectionKey)
         Button {
             withAnimation(.easeInOut(duration: AnimDuration.fast)) {
-                if isCollapsed { collapsedSections.remove(sectionKey) }
-                else { collapsedSections.insert(sectionKey) }
+                var keys = collapsedSectionsRaw.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+                if isCollapsed {
+                    keys.removeAll { $0 == sectionKey }
+                } else {
+                    if !keys.contains(sectionKey) { keys.append(sectionKey) }
+                }
+                collapsedSectionsRaw = keys.sorted().joined(separator: ",")
             }
             Haptics.play(.light)
         } label: {
@@ -1673,7 +1690,8 @@ struct iPadSidebarContent: View {
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.notes {
+                    if dependencies.authViewModel.featurePermissions.notes
+                        && (dependencies.authViewModel.backendConfig?.features?.enableNotes ?? true) {
                         Button { showNotes = true } label: {
                             Label("Notes", systemImage: "note.text")
                         }
@@ -1685,7 +1703,8 @@ struct iPadSidebarContent: View {
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.automations {
+                    if dependencies.authViewModel.featurePermissions.automations
+                        && (dependencies.authViewModel.backendConfig?.features?.enableAutomations ?? true) {
                         Button { showAutomations = true } label: {
                             Label("Automations", systemImage: "clock.arrow.circlepath")
                         }

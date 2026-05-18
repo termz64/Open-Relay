@@ -102,7 +102,19 @@ struct MainChatView: View {
     @AppStorage("sidebar_channels_expanded") private var channelsExpanded: Bool = true
     @AppStorage("sidebar_chats_expanded") private var chatsExpanded: Bool = true
     /// Tracks which time-group sub-sections are collapsed (e.g. "Pinned", "Today").
-    @State private var collapsedSections: Set<String> = []
+    /// Persisted across launches as a comma-separated string in AppStorage.
+    @AppStorage("sidebar_collapsed_sections") private var collapsedSectionsRaw: String = ""
+
+    /// The decoded set of collapsed section keys, derived from `collapsedSectionsRaw`.
+    private var collapsedSections: Set<String> {
+        get {
+            let keys = collapsedSectionsRaw.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+            return Set(keys)
+        }
+        set {
+            collapsedSectionsRaw = newValue.sorted().joined(separator: ",")
+        }
+    }
 
     /// Cached container width from GeometryReader (avoids deprecated UIScreen.main).
     @State private var containerWidth: CGFloat = 360
@@ -1143,6 +1155,7 @@ struct MainChatView: View {
                 group.addTask { await listViewModel.folderViewModel.refreshFolders() }
                 group.addTask { await channelListVM.refreshChannels() }
                 group.addTask { await chatVM.fetchPinnedModels() }
+                group.addTask { await dependencies.authViewModel.refreshBackendConfig() }
             }
         }
     }
@@ -1301,6 +1314,7 @@ struct MainChatView: View {
 
                     // ── DIVIDER between Folders & Channels ──────────────
                     let channelsEnabled = dependencies.authViewModel.featurePermissions.channels
+                        && (dependencies.authViewModel.backendConfig?.features?.enableChannels ?? true)
                     if (foldersEnabled && !folderVM.featureDisabled && !folderVM.folders.isEmpty) || (channelsEnabled && !channelListVM.channels.isEmpty) {
                         Rectangle()
                             .fill(theme.textTertiary.opacity(0.15))
@@ -1923,11 +1937,13 @@ struct MainChatView: View {
         let isCollapsed = collapsedSections.contains(sectionKey)
         Button {
             withAnimation(.easeInOut(duration: AnimDuration.fast)) {
+                var keys = collapsedSectionsRaw.split(separator: ",").map(String.init).filter { !$0.isEmpty }
                 if isCollapsed {
-                    collapsedSections.remove(sectionKey)
+                    keys.removeAll { $0 == sectionKey }
                 } else {
-                    collapsedSections.insert(sectionKey)
+                    if !keys.contains(sectionKey) { keys.append(sectionKey) }
                 }
+                collapsedSectionsRaw = keys.sorted().joined(separator: ",")
             }
             Haptics.play(.light)
         } label: {
@@ -2448,7 +2464,8 @@ struct MainChatView: View {
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.notes {
+                    if dependencies.authViewModel.featurePermissions.notes
+                        && (dependencies.authViewModel.backendConfig?.features?.enableNotes ?? true) {
                         Button {
                             closeDrawer()
                             showNotes = true
@@ -2466,7 +2483,8 @@ struct MainChatView: View {
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.automations {
+                    if dependencies.authViewModel.featurePermissions.automations
+                        && (dependencies.authViewModel.backendConfig?.features?.enableAutomations ?? true) {
                         Button {
                             closeDrawer()
                             showAutomations = true

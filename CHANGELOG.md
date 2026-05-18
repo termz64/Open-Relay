@@ -1,5 +1,12 @@
 # Changelog
 
+## v4.5.2 — May 18, 2026
+
+### Bug Fixes
+- Fixed sidebar sections (Pinned, Today, Yesterday, etc.) resetting to expanded on every app launch — collapse state now persists across launches.
+- Fixed various server-level enabled/disabled settings.
+
+
 ## v4.5.1 — May 16, 2026
 
 ### Improvements

@@ -1200,6 +1200,18 @@ final class AuthViewModel {
         await ensureBackendConfig()
     }
 
+    /// Force-refreshes `backendConfig` from the server unconditionally.
+    /// Called when the sidebar opens so that server-side feature flags
+    /// (e.g. enableChannels, enableNotes) are always up-to-date.
+    func refreshBackendConfig() async {
+        guard let client = dependencies?.apiClient else { return }
+        do {
+            backendConfig = try await client.getBackendConfig()
+        } catch {
+            logger.warning("Failed to refresh backend config: \(error.localizedDescription)")
+        }
+    }
+
     /// Ensures `backendConfig` is populated by fetching it from the server.
     /// Called before transitioning to `authMethodSelection` so that OAuth providers,
     /// signup availability, etc. are all visible.

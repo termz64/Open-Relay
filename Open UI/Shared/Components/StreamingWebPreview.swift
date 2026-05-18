@@ -137,7 +137,7 @@ struct StreamingWebPreview: UIViewRepresentable {
                     coord.pendingReconcileWorkItem = nil
                     let capturedContent = content
                     Task.detached(priority: .userInitiated) { [weak webView] in
-                        let escaped = Coordinator.escape(capturedContent)
+                        let escaped = await Coordinator.escape(capturedContent)
                         await MainActor.run {
                             webView?.evaluateJavaScript("reconcileContent(`\(escaped)`)", completionHandler: nil)
                         }
