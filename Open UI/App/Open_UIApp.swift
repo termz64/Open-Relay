@@ -156,6 +156,11 @@ struct Open_UIApp: App {
                                 defaults?.removeObject(forKey: "pendingControlCenterAction")
                                 handleControlCenterAction(ccAction)
                             }
+
+                            // 3. Pending shared content from Share Extension
+                            if defaults?.data(forKey: "pending_shared_content") != nil {
+                                handleSharedContent()
+                            }
                         }
                     }
                     if newPhase == .inactive || newPhase == .background {
@@ -322,9 +327,87 @@ struct Open_UIApp: App {
                 router.navigate(to: .noteEditor(noteId: noteId))
             }
 
+        case "shared-content":
+            // openui://shared-content
+            // Posted by the Share Extension after writing SharedContent to App Group UserDefaults.
+            // Delay slightly so the main app has time to finish launching / foregrounding.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                handleSharedContent()
+            }
+
         default:
             break
         }
+    }
+
+    /// Reads SharedContent written by the Share Extension, converts it to
+    /// chat attachments / input text, and opens a new chat.
+    private func handleSharedContent() {
+        guard let content = dependencies.processPendingSharedContent() else { return }
+
+        var attachments: [ChatAttachment] = []
+        var inputText: String = ""
+
+        // --- Files / images ---
+        for sharedFile in content.fileAttachments {
+            let ext = URL(fileURLWithPath: sharedFile.name).pathExtension.lowercased()
+            let imageExts = ["jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tiff", "bmp"]
+            let isImage = imageExts.contains(ext)
+                || sharedFile.mimeType?.hasPrefix("image/") == true
+            let thumbnail: Image? = isImage
+                ? UIImage(data: sharedFile.data).map { Image(uiImage: $0) }
+                : nil
+            attachments.append(ChatAttachment(
+                type: isImage ? .image : .file,
+                name: sharedFile.name,
+                thumbnail: thumbnail,
+                data: sharedFile.data
+            ))
+        }
+
+        // --- Legacy image data (older extension builds) ---
+        for imageData in content.imageData {
+            let thumbnail = UIImage(data: imageData).map { Image(uiImage: $0) }
+            attachments.append(ChatAttachment(
+                type: .image,
+                name: "image.jpg",
+                thumbnail: thumbnail,
+                data: imageData
+            ))
+        }
+
+        // --- URLs → web-scraping pipeline (scrape + upload, not plain text) ---
+        // processWebURL() is called in ChatDetailView via applyShareExtensionHandlers
+        // once the new chat is open and the view model is ready.
+        let urlStrings = content.urls
+        if !urlStrings.isEmpty {
+            dependencies.pendingIncomingWebURLs = urlStrings
+            dependencies.pendingIncomingWebURLsVersion += 1
+        }
+
+        // --- Plain text ---
+        if let text = content.text, !text.isEmpty {
+            inputText = text
+        }
+
+        // If we have attachments, inject the first one as pendingIncomingFile and
+        // store the rest in pendingIncomingExtraAttachments. Then open a new chat.
+        if let first = attachments.first {
+            dependencies.pendingIncomingFile = first
+            // Store any additional attachments (multi-file share)
+            if attachments.count > 1 {
+                dependencies.pendingIncomingExtraAttachments = Array(attachments.dropFirst())
+            }
+            dependencies.pendingIncomingFileVersion += 1
+        }
+
+        if !inputText.isEmpty {
+            dependencies.pendingIncomingText = inputText
+            dependencies.pendingIncomingTextVersion += 1
+        }
+
+        dependencies.activeChatStore.remove(nil)
+        router.navigate(to: .newChat)
     }
 
     // MARK: - Overlay Dismissal

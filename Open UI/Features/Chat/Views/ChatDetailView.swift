@@ -225,12 +225,14 @@ struct ChatDetailView: View {
                 isScrolledUp = false
                 windowEnd = nil
                 windowSize = min(maxWindowSize, loadedCount)
-                // Suppress the content-height-driven streaming scroll for
-                // the next 400 ms while WKWebViews, MarkdownView, and other
-                // expensive blocks finish their first layout pass. Without
-                // this guard the scroll pump fires on each height growth event
-                // and produces multiple position jumps (A3 fix).
-                _pumpRef.lastScrollTime = Date()
+                // Suppress the content-height-driven streaming scroll while
+                // WKWebViews, MarkdownView, and other expensive blocks finish
+                // their first layout pass. The pump interval is 400 ms; adding
+                // a 500 ms offset gives ~900 ms total dead-zone — enough for
+                // WKWebViews on older devices to report their rendered heights
+                // via JS postMessage without triggering scroll position jumps
+                // (A3 fix, extended for lazy WKWebView init).
+                _pumpRef.lastScrollTime = Date().addingTimeInterval(0.5)
             }
             await viewModel.fetchPinnedModels()
             // Rebuild prompts after load() — models are now fetched with fresh
@@ -340,6 +342,21 @@ struct ChatDetailView: View {
                 dependencies.pendingIncomingFile = nil
             }
         }
+        // Pick up extra attachments from the Share Extension (URLs shared alongside files).
+        // These are any attachments beyond the first (which uses pendingIncomingFile).
+        .onChange(of: dependencies.pendingIncomingFileVersion) { _, _ in
+            let extras = dependencies.pendingIncomingExtraAttachments
+            if !extras.isEmpty {
+                for attachment in extras {
+                    viewModel.attachments.append(attachment)
+                    viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+                }
+                dependencies.pendingIncomingExtraAttachments = []
+            }
+        }
+        // Pre-fill input text and trigger web-scraping for URLs from the Share Extension.
+        // Extracted into a private extension to keep the type-checker expression size manageable.
+        .applyShareExtensionHandlers(dependencies: dependencies, viewModel: viewModel)
         .sheet(item: $sourcesSheetMessage) { message in
             SourcesDetailSheet(sources: message.sources)
         }
@@ -4231,6 +4248,35 @@ private extension View {
             )
             .sheet(item: codePreviewCode) { code in
                 FullCodeView(code: code, language: codePreviewLanguage.wrappedValue)
+            }
+    }
+}
+
+// MARK: - Share Extension Handlers (Type-Checker Relief)
+
+/// Handles both the plain-text pre-fill and the web-scraping URL pipeline
+/// from the Share Extension. Extracted from body so the Swift type-checker
+/// doesn't have to resolve these two `.onChange` closures inline.
+private extension View {
+    func applyShareExtensionHandlers(
+        dependencies: AppDependencyContainer,
+        viewModel: ChatViewModel
+    ) -> some View {
+        self
+            .onChange(of: dependencies.pendingIncomingTextVersion) { _, _ in
+                if let text = dependencies.pendingIncomingText, !text.isEmpty {
+                    viewModel.inputText = text
+                    dependencies.pendingIncomingText = nil
+                }
+            }
+            .onChange(of: dependencies.pendingIncomingWebURLsVersion) { _, _ in
+                let urls = dependencies.pendingIncomingWebURLs
+                if !urls.isEmpty {
+                    dependencies.pendingIncomingWebURLs = []
+                    for urlString in urls {
+                        viewModel.processWebURL(urlString: urlString)
+                    }
+                }
             }
     }
 }

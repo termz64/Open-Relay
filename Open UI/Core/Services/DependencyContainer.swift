@@ -277,6 +277,26 @@ final class AppDependencyContainer: ServiceContainer {
     /// even when the view is already visible.
     var pendingIncomingFileVersion: Int = 0
 
+    /// Additional attachments from the Share Extension (beyond the first one which
+    /// uses `pendingIncomingFile`). Consumed once by `ChatDetailView`.
+    var pendingIncomingExtraAttachments: [ChatAttachment] = []
+
+    /// Pre-fill text from the Share Extension (URLs and/or plain text).
+    /// Consumed once by `ChatDetailView`.
+    var pendingIncomingText: String?
+
+    /// Incremented each time new shared text/URL content arrives from the Share Extension.
+    /// `ChatDetailView` observes this via `onChange` to pre-fill the input field.
+    var pendingIncomingTextVersion: Int = 0
+
+    /// URLs shared via the Share Extension that should be processed through the
+    /// web-scraping pipeline (`processWebURL`) instead of stored as plain text.
+    /// Consumed once by `ChatDetailView` via `onChange(of: pendingIncomingWebURLsVersion)`.
+    var pendingIncomingWebURLs: [String] = []
+
+    /// Incremented each time new URLs are queued in `pendingIncomingWebURLs`.
+    var pendingIncomingWebURLsVersion: Int = 0
+
     init() {
         self.serverConfigStore = ServerConfigStore()
         self.appearanceManager = AppearanceManager()

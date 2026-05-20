@@ -162,7 +162,11 @@ struct AuthenticatedImageView: View {
                     // Cache for future scroll-backs
                     let cost = data.count
                     Self.imageCache.setObject(uiImage, forKey: fileId as NSString, cost: cost)
-                    loadedImage = uiImage
+                    // Suppress implicit animation so the layout change from
+                    // placeholder-height → image-height does not trigger a
+                    // SwiftUI geometry animation that causes the scroll view to
+                    // jump when the chat loads (Fix 3).
+                    withAnimation(.none) { loadedImage = uiImage }
                     hasError = false
                     isLoading = false
                     return

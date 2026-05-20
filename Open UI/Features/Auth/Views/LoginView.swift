@@ -99,7 +99,9 @@ struct LoginView: View {
                         placeholder: "you@example.com",
                         text: $viewModel.email,
                         keyboardType: .emailAddress,
-                        textContentType: .emailAddress
+                        // Use .username (not .emailAddress) so iOS password managers
+                        // can associate this field with saved login credentials.
+                        textContentType: .username
                     )
 
                     ModernTextField(
@@ -110,7 +112,7 @@ struct LoginView: View {
                         textContentType: .password,
                         onSubmit: {
                             if !viewModel.email.isEmpty && !viewModel.password.isEmpty {
-                                Task { await viewModel.login() }
+                                Task { await performLogin() }
                             }
                         }
                     )
@@ -121,6 +123,11 @@ struct LoginView: View {
                             .shakeOnError(trigger: shakeCount)
                     }
 
+                    // Face ID / Touch ID quick sign-in button
+                    if viewModel.canUseBiometricLogin {
+                        biometricLoginButton
+                    }
+
                     // Sign in button
                     AuthPrimaryButton(
                         title: "Sign in",
@@ -129,7 +136,7 @@ struct LoginView: View {
                         isDisabled: viewModel.email.isEmpty || viewModel.password.isEmpty
                     ) {
                         Task {
-                            await viewModel.login()
+                            await performLogin()
                             if viewModel.errorMessage != nil {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.5)) {
                                     shakeCount += 1
@@ -196,6 +203,78 @@ struct LoginView: View {
                 formAppeared = true
             }
         }
+        // Prompt to save credentials for Face ID / Touch ID after a successful manual login.
+        // Driven by `viewModel.pendingBiometricSaveCredentials` — login() sets this BEFORE
+        // advancing to .authenticated so the alert is presented while LoginView is still alive.
+        .alert(
+            "Save for \(viewModel.biometricTypeName)?",
+            isPresented: Binding(
+                get: { viewModel.pendingBiometricSaveCredentials != nil },
+                set: { if !$0 { viewModel.proceedToAuthenticated() } }
+            )
+        ) {
+            Button("Save") {
+                if let creds = viewModel.pendingBiometricSaveCredentials {
+                    viewModel.saveBiometricCredentials(email: creds.email, password: creds.password)
+                }
+                viewModel.proceedToAuthenticated()
+            }
+            Button("Not Now", role: .cancel) {
+                viewModel.proceedToAuthenticated()
+            }
+        } message: {
+            Text("Next time you can sign in instantly with \(viewModel.biometricTypeName) — no password needed.")
+        }
+    }
+
+    // MARK: - Biometric Button
+
+    private var biometricLoginButton: some View {
+        Button {
+            Task {
+                await viewModel.loginWithBiometrics()
+                if viewModel.errorMessage != nil {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.5)) {
+                        shakeCount += 1
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: biometricIconName)
+                    .scaledFont(size: 16, weight: .medium)
+                Text("Sign in with \(viewModel.biometricTypeName)")
+                    .scaledFont(size: 15, weight: .medium)
+            }
+            .foregroundStyle(theme.brandPrimary)
+            .frame(maxWidth: .infinity)
+            .frame(height: TouchTarget.minimum)
+            .background(theme.brandPrimary.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.button, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: CornerRadius.button, style: .continuous)
+                    .strokeBorder(theme.brandPrimary.opacity(0.2), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .pressEffect()
+    }
+
+    private var biometricIconName: String {
+        switch viewModel.biometricTypeName {
+        case "Face ID": return "faceid"
+        case "Touch ID": return "touchid"
+        default: return "faceid"
+        }
+    }
+
+    // MARK: - Login Helper
+
+    /// Calls login(). The ViewModel handles all post-login logic including
+    /// setting `pendingBiometricSaveCredentials` when a biometric save prompt is needed.
+    /// The `.alert` above is driven by that property, so no extra work is needed here.
+    private func performLogin() async {
+        await viewModel.login()
     }
 }
 

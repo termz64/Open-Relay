@@ -160,7 +160,7 @@ struct HTMLPreviewView: View {
     // MARK: - Streaming Preview (live reconcile/finalize via JS)
 
     private var streamingPreviewView: some View {
-        StreamingWebPreview(
+        LazyStreamingWebPreview(
             content: html,
             mode: .html,
             isStreaming: isStreaming,

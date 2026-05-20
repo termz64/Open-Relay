@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import LocalAuthentication
 
 /// Securely stores and retrieves authentication tokens using the iOS Keychain.
 ///
@@ -166,6 +167,136 @@ final class KeychainService: Sendable {
         return status == errSecSuccess || status == errSecItemNotFound
     }
 
+    // MARK: - Biometric Credential Storage
+
+    /// Saves email + password for a server, protected by biometric authentication
+    /// (Face ID / Touch ID). The item requires `.userPresence` — the OS will
+    /// show the Face ID / Touch ID prompt before allowing reads.
+    ///
+    /// Returns `true` on success. Returns `false` if the device doesn't support
+    /// biometrics or if saving fails.
+    @discardableResult
+    func saveBiometricCredentials(email: String, password: String, forServer serverURL: String) -> Bool {
+        let key = biometricCredentialKey(for: serverURL)
+        let payload = "\(email)\n\(password)"
+        guard let data = payload.data(using: .utf8) else { return false }
+
+        // Delete existing item first (update is not supported with .userPresence access control)
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: key
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        // Create access control requiring biometric or device passcode
+        var error: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+            nil,
+            kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+            .userPresence,
+            &error
+        ) else { return false }
+
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: key,
+            kSecValueData as String: data,
+            kSecAttrAccessControl as String: access
+        ]
+
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        return status == errSecSuccess
+    }
+
+    /// Retrieves the saved biometric credentials for a server.
+    ///
+    /// This call will trigger a Face ID / Touch ID prompt (or passcode fallback).
+    /// `prompt` is the string shown in the system biometric dialog.
+    ///
+    /// Returns `(email, password)` on success, `nil` on failure or cancellation.
+    func loadBiometricCredentials(forServer serverURL: String, prompt: String = "Sign in to Open Relay") -> (email: String, password: String)? {
+        let key = biometricCredentialKey(for: serverURL)
+
+        let context = LAContext()
+        context.localizedReason = prompt
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: key,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let payload = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        let parts = payload.components(separatedBy: "\n")
+        guard parts.count >= 2 else { return nil }
+        return (email: parts[0], password: parts[1...].joined(separator: "\n"))
+    }
+
+    /// Checks whether biometric credentials are saved for a server (no biometric prompt).
+    func hasBiometricCredentials(forServer serverURL: String) -> Bool {
+        let key = biometricCredentialKey(for: serverURL)
+        // Use kSecUseAuthenticationUIFail so the system doesn't show a prompt —
+        // we just want to know if the item exists.
+        let noInteractionContext = LAContext()
+        noInteractionContext.interactionNotAllowed = true
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: key,
+            kSecUseAuthenticationContext as String: noInteractionContext
+        ]
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        // errSecInteractionNotAllowed means item exists but requires auth (what we want)
+        return status == errSecSuccess || status == errSecInteractionNotAllowed
+    }
+
+    /// Deletes saved biometric credentials for a server.
+    @discardableResult
+    func deleteBiometricCredentials(forServer serverURL: String) -> Bool {
+        let key = biometricCredentialKey(for: serverURL)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: key
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    /// Whether the current device supports biometric authentication (Face ID / Touch ID).
+    var isBiometricsAvailable: Bool {
+        let context = LAContext()
+        var error: NSError?
+        return context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+    }
+
+    /// The human-readable name for the available biometric type ("Face ID", "Touch ID", or nil).
+    var biometricTypeName: String? {
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
+            return nil
+        }
+        switch context.biometryType {
+        case .faceID: return "Face ID"
+        case .touchID: return "Touch ID"
+        case .opticID: return "Optic ID"
+        default: return nil
+        }
+    }
+
     // MARK: - Private
 
     /// Derives a stable Keychain account key from a server URL.
@@ -178,6 +309,12 @@ final class KeychainService: Sendable {
     private func accountKey(for serverURL: String, userId: String) -> String {
         let normalized = normalizeURL(serverURL)
         return "token:\(normalized)::\(userId)"
+    }
+
+    /// Derives the Keychain account key for biometric credentials.
+    private func biometricCredentialKey(for serverURL: String) -> String {
+        let normalized = normalizeURL(serverURL)
+        return "biometric_creds:\(normalized)"
     }
 
     /// Normalizes a URL for use as a Keychain key component.

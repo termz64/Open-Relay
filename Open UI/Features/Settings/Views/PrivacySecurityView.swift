@@ -10,13 +10,24 @@ struct PrivacySecurityView: View {
     @State private var showExportSheet = false
     @State private var exportError: String?
     @State private var showLocationDeniedAlert = false
+    @State private var showDisableBiometricsConfirm = false
 
     // Observe the shared LocationManager so the UI refreshes when auth status changes
     private var locationManager: LocationManager { LocationManager.shared }
 
+    // Access AuthViewModel for biometric settings
+    private var authVM: AuthViewModel { dependencies.authViewModel }
+
     var body: some View {
         ScrollView {
             VStack(spacing: Spacing.sectionGap) {
+
+                // Biometric Authentication (only shown when Face ID / Touch ID is available)
+                if KeychainService.shared.isBiometricsAvailable {
+                    SettingsSection(header: "Authentication") {
+                        biometricRow
+                    }
+                }
 
                 // Location
                 SettingsSection(header: "Location") {
@@ -70,6 +81,82 @@ struct PrivacySecurityView: View {
         } message: {
             Text("Open Relay needs location access to use {{USER_LOCATION}} in prompts. Please enable it in Settings > Privacy & Security > Location Services.")
         }
+    }
+
+    // MARK: - Biometric Row
+
+    @ViewBuilder
+    private var biometricRow: some View {
+        let typeName = authVM.biometricTypeName
+        let iconName: String = {
+            switch typeName {
+            case "Face ID": return "faceid"
+            case "Touch ID": return "touchid"
+            default: return "faceid"
+            }
+        }()
+        let isEnabled = authVM.biometricLoginEnabled
+        let hasCredentials = authVM.canUseBiometricLogin || isEnabled
+
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.purple.opacity(0.15))
+                    .frame(width: 32, height: 32)
+                Image(systemName: iconName)
+                    .scaledFont(size: 14, weight: .medium)
+                    .foregroundStyle(Color.purple)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(typeName)
+                    .scaledFont(size: 15)
+                    .foregroundStyle(theme.textPrimary)
+                Text(biometricSubtitle(isEnabled: isEnabled, hasCredentials: hasCredentials))
+                    .scaledFont(size: 12)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { isEnabled },
+                set: { newValue in
+                    if newValue {
+                        // Can only enable if credentials are already saved
+                        // (done automatically after manual login)
+                        if authVM.currentServerURL != nil,
+                           KeychainService.shared.hasBiometricCredentials(
+                               forServer: authVM.currentServerURL ?? "") {
+                            authVM.biometricLoginEnabled = true
+                        } else {
+                            // No credentials saved yet — turning on is a no-op;
+                            // the user will be prompted to save after their next manual login.
+                            authVM.biometricLoginEnabled = true
+                        }
+                    } else {
+                        // Turning off: clear credentials and disable
+                        authVM.clearBiometricCredentials()
+                        authVM.biometricLoginEnabled = false
+                    }
+                }
+            ))
+            .labelsHidden()
+            .tint(Color.purple)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private func biometricSubtitle(isEnabled: Bool, hasCredentials: Bool) -> String {
+        if !isEnabled {
+            return "Sign in instantly without typing your password"
+        }
+        if hasCredentials {
+            return "Enabled — sign in with \(authVM.biometricTypeName)"
+        }
+        return "Enabled — sign in manually once to save credentials"
     }
 
     // MARK: - Location Row

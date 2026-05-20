@@ -281,7 +281,7 @@ final class ServerConnectionMonitor: @unchecked Sendable {
 
                 guard !Task.isCancelled else { break }
 
-                let interval = await self.currentPollInterval()
+                let interval = self.currentPollInterval()
                 try? await Task.sleep(for: .seconds(interval))
             }
         }

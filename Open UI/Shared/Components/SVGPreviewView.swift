@@ -117,7 +117,7 @@ struct SVGPreviewView: View {
     /// `isStreaming: true`  → reconcileContent called on each content change (live preview).
     /// `isStreaming: false` → finalizeContent called once (settled, animations run freely).
     private var webView: some View {
-        StreamingWebPreview(
+        LazyStreamingWebPreview(
             content: code,
             mode: .svg,
             isStreaming: isStreaming,

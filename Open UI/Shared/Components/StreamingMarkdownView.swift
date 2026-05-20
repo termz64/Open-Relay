@@ -1023,9 +1023,29 @@ private struct MarkdownInlineImageView: View {
     // Feedback toast for save-to-photos action.
     @State private var savedToPhotos = false
 
+    // ── Base64 async decode state ──────────────────────────────────────────
+    // The decode (base64 + UIImage decompress) runs off the main thread so it
+    // never blocks the SwiftUI layout pass when opening a chat with images.
+    @State private var decodedBase64Image: UIImage? = nil
+    @State private var base64DecodeError = false
+
+    /// Process-lifetime cache for decoded base64 UIImages.
+    /// Keyed by a cheap surrogate (total length + first 80 chars) so the full
+    /// multi-MB absoluteString is never copied just to form a cache key.
+    /// On a cache hit the image appears synchronously on the first render —
+    /// no placeholder flash when scrolling back through a chat.
+    private static let base64ImageCache = NSCache<NSString, UIImage>()
+
+    /// Cheap cache key derived from the URI without copying the full payload.
+    private static func base64CacheKey(for url: URL) -> NSString {
+        let s = url.absoluteString
+        return "\(s.count)_\(s.prefix(80))" as NSString
+    }
+
     /// Attempts to decode a `data:image/...;base64,<payload>` URI into a UIImage.
     /// Returns `nil` for any other scheme or malformed URI.
-    private static func decodeDataURI(_ url: URL) -> UIImage? {
+    /// Safe to call from a background thread — no UIKit main-thread APIs used.
+    private nonisolated static func decodeDataURI(_ url: URL) -> UIImage? {
         let raw = url.absoluteString
         guard raw.hasPrefix("data:image/") else { return nil }
         // Find the comma that separates the header from the payload.
@@ -1042,10 +1062,53 @@ private struct MarkdownInlineImageView: View {
     var body: some View {
         if imageURL.scheme == "data" {
             // ── Inline Base64 data URI ────────────────────────────────────────
-            if let uiImage = Self.decodeDataURI(imageURL) {
+            // Decoding happens off the main thread to prevent the freeze that
+            // occurs when opening a chat with multiple base64 images — each
+            // Data(base64Encoded:) + UIImage(data:) call blocks the main thread
+            // for 50–200ms on older devices.
+            if let uiImage = decodedBase64Image {
                 base64ImageView(uiImage: uiImage)
-            } else {
+            } else if base64DecodeError {
                 dataURIErrorPlaceholder
+            } else {
+                // Stable-height loading placeholder — same height as the remote
+                // image placeholder so there's no layout shift on decode completion.
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(theme.surfaceContainer.opacity(0.5))
+                    .frame(height: 160)
+                    .overlay {
+                        VStack(spacing: 6) {
+                            ProgressView()
+                            if !altText.isEmpty {
+                                Text(altText)
+                                    .scaledFont(size: 12)
+                                    .foregroundStyle(theme.textTertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                    .task(id: imageURL) {
+                        let key = Self.base64CacheKey(for: imageURL)
+                        // Check process-level cache first — instant on scroll-back.
+                        if let cached = Self.base64ImageCache.object(forKey: key) {
+                            withAnimation(.none) { decodedBase64Image = cached }
+                            return
+                        }
+                        // Decode on a background thread — base64 + image decompression
+                        // can be 50–200ms; must not run on the main thread.
+                        let url = imageURL
+                        let decoded = await Task.detached(priority: .userInitiated) {
+                            Self.decodeDataURI(url)
+                        }.value
+                        if let image = decoded {
+                            Self.base64ImageCache.setObject(image, forKey: key)
+                            // Suppress implicit animation so the layout change from
+                            // placeholder → image does not cause a scroll jump.
+                            withAnimation(.none) { decodedBase64Image = image }
+                        } else {
+                            base64DecodeError = true
+                        }
+                    }
             }
         } else {
             // ── Remote http/https image ───────────────────────────────────────

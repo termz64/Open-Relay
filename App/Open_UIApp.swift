@@ -1,0 +1,741 @@
+import SwiftUI
+import WidgetKit
+import BackgroundTasks
+import UIKit
+import AVFoundation
+
+// MLX is always present when either audio framework is linked.
+// Import it unconditionally so we can set Memory.cacheLimit at startup
+// before the Metal GPU runtime inflates its buffer pool.
+#if canImport(MLX)
+import MLX
+#endif
+
+// MARK: - App Delegate + Scene Delegate (handles home screen Quick Actions)
+//
+// In a scene-based SwiftUI app (UIApplicationSceneManifest_Generation = YES),
+// UIApplicationDelegate.performActionFor is NEVER called for shortcut items.
+// iOS routes them to the UIWindowSceneDelegate instead:
+//   • Cold launch  → scene(_:willConnectTo:options:)  (connectionOptions.shortcutItem)
+//   • Warm launch  → windowScene(_:performActionFor:completionHandler:)
+
+final class AppDelegate: NSObject, UIApplicationDelegate {
+
+    /// Pending shortcut action type string, set by the scene delegate.
+    /// Consumed by the `scenePhase == .active` handler in `Open_UIApp`.
+    static var pendingShortcutAction: String?
+
+    /// Return a scene configuration that uses our custom SceneDelegate.
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let config = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+        config.delegateClass = ShortcutSceneDelegate.self
+        return config
+    }
+}
+
+/// Scene delegate that intercepts shortcut items on both cold and warm launch.
+final class ShortcutSceneDelegate: UIResponder, UIWindowSceneDelegate {
+
+    /// **Cold launch**: shortcut item arrives in connectionOptions.
+    func scene(
+        _ scene: UIScene,
+        willConnectTo session: UISceneSession,
+        options connectionOptions: UIScene.ConnectionOptions
+    ) {
+        if let shortcutItem = connectionOptions.shortcutItem {
+            AppDelegate.pendingShortcutAction = shortcutItem.type
+        }
+    }
+
+    /// **Warm launch**: app already running / suspended when user taps a quick action.
+    func windowScene(
+        _ windowScene: UIWindowScene,
+        performActionFor shortcutItem: UIApplicationShortcutItem,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        AppDelegate.pendingShortcutAction = shortcutItem.type
+        completionHandler(true)
+    }
+}
+
+@main
+struct Open_UIApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @State private var dependencies = AppDependencyContainer()
+    @State private var router = AppRouter()
+    @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        // Limit the MLX Metal GPU buffer-recycling cache to 20 MB.
+        //
+        // By default, MLX sizes its cache to `recommendedMaxWorkingSetSize`, which
+        // scales with device RAM (e.g. ~2 GB on an iPhone with 8 GB RAM). The cache
+        // stays inflated even when no model is loaded, causing ~500 MB of "dirty"
+        // memory at startup that iOS counts against our memory footprint. Setting a
+        // small limit here means the cache is immediately trimmed on the next
+        // deallocation event rather than staying large until the app backgrounds.
+        //
+        // 20 MB is the value from Apple's own MLX iOS guide. It's enough for smooth
+        // TTS/ASR inference without the startup memory spike.
+        #if canImport(MLX)
+        Memory.cacheLimit = 20 * 1024 * 1024  // 20 MB
+        #endif
+
+        // Establish the global AVAudioSession baseline at launch.
+        // .playAndRecord ignores the hardware silent switch (unlike .ambient/.soloAmbient).
+        // .defaultToSpeaker routes to the main loud speaker rather than the earpiece.
+        // .mixWithOthers prevents interrupting music/podcasts from other apps.
+        // .allowBluetoothHFP/.allowBluetoothA2DP keep BT headsets and CarPlay connected.
+        //
+        // Setting this BEFORE any WKWebView is created ensures the WebContent process
+        // inherits the "ignore silent switch" behavior. Individual services (TTS, voice call)
+        // can adjust category/mode on the same shared session as needed, then the JS
+        // audioSessionHandler re-asserts .playback when HTML audio starts.
+        let audioSession = AVAudioSession.sharedInstance()
+        try? audioSession.setCategory(
+            .playAndRecord,
+            mode: .default,
+            options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers]
+        )
+        try? audioSession.setActive(true)
+
+        // Remove the default circular/pill-shaped backgrounds from navigation
+        // bar toolbar buttons that iOS adds in dark mode (iOS 15+).
+        let plainButtonAppearance = UIBarButtonItemAppearance(style: .plain)
+        plainButtonAppearance.normal.titleTextAttributes = [:]
+        plainButtonAppearance.highlighted.titleTextAttributes = [:]
+
+        let navBarAppearance = UINavigationBarAppearance()
+        navBarAppearance.configureWithTransparentBackground()
+        navBarAppearance.buttonAppearance = plainButtonAppearance
+        navBarAppearance.doneButtonAppearance = plainButtonAppearance
+
+        UINavigationBar.appearance().standardAppearance = navBarAppearance
+        UINavigationBar.appearance().scrollEdgeAppearance = navBarAppearance
+        UINavigationBar.appearance().compactAppearance = navBarAppearance
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(router)
+                .environment(dependencies)
+                .task {
+                    // Wire the router into the dependency container so AuthViewModel
+                    // can reset navigation on server switch (must be done after both
+                    // objects are injected into the environment).
+                    dependencies.router = router
+                }
+                .preferredColorScheme(dependencies.appearanceManager.resolvedColorScheme)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                .onChange(of: scenePhase) { _, newPhase in
+                    if newPhase == .active {
+                        // Notify connection monitor that the app is in the foreground.
+                        // This triggers an immediate health check + socket reconnect,
+                        // cancelling any pending backoff timer so recovery is instant.
+                        dependencies.connectionMonitor.markAppForeground()
+                        dependencies.socketService?.resetBackoffAndReconnect()
+
+                        // Process pending actions after a short delay so that
+                        // MainChatView / iPadMainChatView have time to mount
+                        // their .onReceive handlers before we post notifications.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            // 1. Quick Action from home screen long-press
+                            if let action = AppDelegate.pendingShortcutAction {
+                                AppDelegate.pendingShortcutAction = nil
+                                handleShortcutAction(action)
+                            }
+
+                            // 2. Control Center widget action (cross-process via UserDefaults)
+                            let defaults = UserDefaults(suiteName: SharedDataService.appGroupId)
+                            if let ccAction = defaults?.string(forKey: "pendingControlCenterAction") {
+                                defaults?.removeObject(forKey: "pendingControlCenterAction")
+                                handleControlCenterAction(ccAction)
+                            }
+
+                            // 3. Pending shared content from Share Extension
+                            if defaults?.data(forKey: "pending_shared_content") != nil {
+                                handleSharedContent()
+                            }
+                        }
+                    }
+                    if newPhase == .inactive || newPhase == .background {
+                        // Notify connection monitor + socket that we're backgrounding.
+                        // Suppresses false "server down" overlays caused by the OS
+                        // suspending network activity and cancels reconnect timers
+                        // that would waste battery in the background.
+                        dependencies.connectionMonitor.markAppBackground()
+                        dependencies.socketService?.markAppBackground()
+                        // Stop Kokoro TTS and unload model before backgrounding to prevent
+                        // Metal GPU crash (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted).
+                        // .inactive fires before .background, giving us time to release GPU resources.
+                        dependencies.textToSpeechService.stop()
+                        dependencies.textToSpeechService.kokoroService.stopAndUnload()
+
+                        // ASR background safety: pause on-device transcription on iOS < 26.
+                        //
+                        // iOS < 26: Metal GPU access is forbidden in the background. Calling
+                        // pauseForBackground() cancels the in-flight MLX task and unloads the
+                        // model BEFORE iOS revokes GPU access, preventing the uncatchable
+                        // std::runtime_error crash. ChatViewModel catches .backgroundInterrupted
+                        // and auto-restarts transcription when the app returns to foreground.
+                        //
+                        // iOS 26+: BGContinuedProcessingTask + Background GPU Access entitlement
+                        // keeps the GPU alive in the background, so pauseForBackground() is a
+                        // no-op and transcription continues uninterrupted for minutes.
+                        dependencies.asrService.pauseForBackground()
+
+                        // STORAGE FIX: Run routine cleanup when entering background.
+                        // Cleans orphaned temp files, prunes upload cache, evicts
+                        // oversized image cache. Zero user intervention needed.
+                        StorageManager.shared.performRoutineCleanup()
+                    }
+                }
+                .task {
+                    // STORAGE FIX: Run cleanup on app launch to handle accumulated
+                    // data from previous sessions (orphaned files, stale caches, etc.)
+                    StorageManager.shared.performRoutineCleanup()
+
+                    // Initialize notification service: registers categories and
+                    // requests permission if not yet determined. Also acts as a
+                    // fallback safety net in notifyGenerationComplete() in case
+                    // the user hasn't been prompted yet.
+                    await NotificationService.shared.setup()
+
+                    // Wire notification tap to router
+                    NotificationService.shared.onOpenChat = { conversationId in
+                        router.navigate(to: .chatDetail(conversationId: conversationId))
+                    }
+                }
+                .onOpenURL { url in
+                    if url.isFileURL {
+                        handleIncomingFileURL(url)
+                    } else {
+                        handleDeepLink(url)
+                    }
+                }
+        }
+    }
+
+    /// Handles a file URL received via "Open In" / document import from another app.
+    /// Reads the file data, creates a ChatAttachment, and navigates to a new chat
+    /// with the file pre-attached in the input field.
+    private func handleIncomingFileURL(_ url: URL) {
+        let hasAccess = url.startAccessingSecurityScopedResource()
+        defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
+
+        guard let data = try? Data(contentsOf: url) else { return }
+
+        let fileName = url.lastPathComponent
+        let ext = url.pathExtension.lowercased()
+        let imageExts = ["jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tiff", "bmp"]
+        let isImage = imageExts.contains(ext)
+
+        let thumbnail: Image? = isImage ? UIImage(data: data).map { Image(uiImage: $0) } : nil
+        let attachment = ChatAttachment(
+            type: isImage ? .image : .file,
+            name: fileName,
+            thumbnail: thumbnail,
+            data: data
+        )
+
+        dependencies.pendingIncomingFile = attachment
+        dependencies.pendingIncomingFileVersion += 1
+        dependencies.activeChatStore.remove(nil)
+        router.navigate(to: .newChat)
+    }
+
+    /// Handles deep links from widgets and external sources.
+    private func handleDeepLink(_ url: URL) {
+        guard let host = url.host() else { return }
+
+        switch host {
+        case "new-chat":
+            // Widget "Ask Open Relay" bar → new chat with keyboard auto-focus.
+            // Posts a notification that MainChatView/iPadMainChatView handle directly
+            // (they own the activeConversationId state, not the router).
+            NotificationCenter.default.post(name: .openUINewChatWithFocus, object: nil)
+            ShortcutDonationService.donateNewChat()
+
+        case "voice-call":
+            // Widget mic button → voice call. Posts a notification that
+            // MainChatView/iPadMainChatView handle by creating a VoiceCallViewModel
+            // and presenting it via router.presentVoiceCall(viewModel:).
+            NotificationCenter.default.post(name: .openUIWidgetVoiceCall, object: nil)
+            ShortcutDonationService.donateVoiceCall()
+
+        case "new-note":
+            router.navigate(to: .notesList)
+
+        case "continue":
+            if let conversationId = SharedDataService.shared.lastActiveConversationId {
+                router.navigate(to: .chatDetail(conversationId: conversationId))
+            }
+
+        case "camera-chat":
+            // Widget camera button → new chat + open camera immediately.
+            // Posts newChatWithFocus first (MainChatView/iPadMainChatView handle
+            // creating the new chat via local state), then after a delay posts
+            // the camera notification which ChatDetailView handles.
+            NotificationCenter.default.post(name: .openUINewChatWithFocus, object: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NotificationCenter.default.post(name: .openUICameraChat, object: nil)
+            }
+
+        case "photos-chat":
+            // Widget photos button → new chat + open photo picker immediately.
+            NotificationCenter.default.post(name: .openUINewChatWithFocus, object: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NotificationCenter.default.post(name: .openUIPhotosChat, object: nil)
+            }
+
+        case "file-chat":
+            // Widget files button → new chat + open file picker immediately.
+            NotificationCenter.default.post(name: .openUINewChatWithFocus, object: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NotificationCenter.default.post(name: .openUIFileChat, object: nil)
+            }
+
+        case "new-channel":
+            // Signal the main view to open the create-channel sheet
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                NotificationCenter.default.post(name: .openUINewChannel, object: nil)
+            }
+
+        case "chat":
+            // openui://chat/{conversationId}
+            // FIX: Validate conversation ID format before navigating to prevent
+            // malicious deep links from causing confusing UX.
+            let conversationId = url.pathComponents.last ?? ""
+            if !conversationId.isEmpty && conversationId != "/"
+                && conversationId.count >= 8 && conversationId.count <= 128
+                && conversationId.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) {
+                router.navigate(to: .chatDetail(conversationId: conversationId))
+            }
+
+        case "note":
+            // openui://note/{noteId}
+            // FIX: Validate note ID format before navigating.
+            let noteId = url.pathComponents.last ?? ""
+            if !noteId.isEmpty && noteId != "/"
+                && noteId.count >= 8 && noteId.count <= 128
+                && noteId.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) {
+                router.navigate(to: .noteEditor(noteId: noteId))
+            }
+
+        case "shared-content":
+            // openui://shared-content
+            // Posted by the Share Extension after writing SharedContent to App Group UserDefaults.
+            // Delay slightly so the main app has time to finish launching / foregrounding.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                handleSharedContent()
+            }
+
+        default:
+            break
+        }
+    }
+
+    /// Reads SharedContent written by the Share Extension, converts it to
+    /// chat attachments / input text, and opens a new chat.
+    private func handleSharedContent() {
+        guard let content = dependencies.processPendingSharedContent() else { return }
+
+        var attachments: [ChatAttachment] = []
+        var inputText: String = ""
+
+        // --- Files / images ---
+        for sharedFile in content.fileAttachments {
+            let ext = URL(fileURLWithPath: sharedFile.name).pathExtension.lowercased()
+            let imageExts = ["jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tiff", "bmp"]
+            let isImage = imageExts.contains(ext)
+                || sharedFile.mimeType?.hasPrefix("image/") == true
+            let thumbnail: Image? = isImage
+                ? UIImage(data: sharedFile.data).map { Image(uiImage: $0) }
+                : nil
+            attachments.append(ChatAttachment(
+                type: isImage ? .image : .file,
+                name: sharedFile.name,
+                thumbnail: thumbnail,
+                data: sharedFile.data
+            ))
+        }
+
+        // --- Legacy image data (older extension builds) ---
+        for imageData in content.imageData {
+            let thumbnail = UIImage(data: imageData).map { Image(uiImage: $0) }
+            attachments.append(ChatAttachment(
+                type: .image,
+                name: "image.jpg",
+                thumbnail: thumbnail,
+                data: imageData
+            ))
+        }
+
+        // --- URLs ---
+        // Queue web URLs for the web-scraping pipeline (same as typing #URL in chat).
+        // ChatDetailView picks these up via pendingIncomingWebURLsVersion and calls
+        // viewModel.processWebURL(urlString:) for each one, producing a proper
+        // file-attachment pill instead of raw text.
+        let urlStrings = content.urls
+        if !urlStrings.isEmpty {
+            dependencies.pendingIncomingWebURLs = urlStrings
+            dependencies.pendingIncomingWebURLsVersion += 1
+        }
+
+        // --- Plain text ---
+        if let text = content.text, !text.isEmpty {
+            inputText = text
+        }
+
+        // If we have attachments, inject the first one as pendingIncomingFile and
+        // store the rest in pendingIncomingAttachments. Then open a new chat.
+        if let first = attachments.first {
+            dependencies.pendingIncomingFile = first
+            // Store any additional attachments (multi-file share)
+            if attachments.count > 1 {
+                dependencies.pendingIncomingExtraAttachments = Array(attachments.dropFirst())
+            }
+            dependencies.pendingIncomingFileVersion += 1
+        }
+
+        if !inputText.isEmpty {
+            dependencies.pendingIncomingText = inputText
+            dependencies.pendingIncomingTextVersion += 1
+        }
+
+        dependencies.activeChatStore.remove(nil)
+        router.navigate(to: .newChat)
+    }
+
+    // MARK: - Overlay Dismissal
+
+    /// Dismisses all presented overlays (camera, file picker, voice call, sheets, etc.)
+    /// before starting a new quick action so they don't stack on top of each other.
+    /// Posts a broadcast notification that ChatDetailView, MainChatView, and
+    /// iPadMainChatView each listen for to reset their local overlay booleans.
+    private func dismissAllOverlays() {
+        NotificationCenter.default.post(name: .openUIDismissOverlays, object: nil)
+        router.dismissVoiceCall()
+        router.dismissSheet()
+    }
+
+    // MARK: - Quick Action Handlers
+
+    /// Maps a `UIApplicationShortcutItemType` string (from Info.plist) to the
+    /// corresponding NotificationCenter post so MainChatView / iPadMainChatView
+    /// can react. Called from the `scenePhase == .active` handler after a delay.
+    private func handleShortcutAction(_ type: String) {
+        // Dismiss any existing overlays first so new action doesn't stack
+        dismissAllOverlays()
+
+        // Short delay to let SwiftUI animate the dismissal before presenting new overlay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            switch type {
+            case "com.openui.openui.new-chat":
+                NotificationCenter.default.post(name: .openUINewChatWithFocus, object: nil)
+                ShortcutDonationService.donateNewChat()
+
+            case "com.openui.openui.voice-call":
+                NotificationCenter.default.post(name: .openUIWidgetVoiceCall, object: nil)
+                ShortcutDonationService.donateVoiceCall()
+
+            case "com.openui.openui.camera-chat":
+                NotificationCenter.default.post(name: .openUINewChatWithFocus, object: nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    NotificationCenter.default.post(name: .openUICameraChat, object: nil)
+                }
+
+            case "com.openui.openui.new-channel":
+                NotificationCenter.default.post(name: .openUINewChannel, object: nil)
+
+            default:
+                break
+            }
+        }
+    }
+
+    /// Handles a pending action written to shared UserDefaults by the
+    /// Control Center widget extension (runs in a separate process).
+    private func handleControlCenterAction(_ action: String) {
+        // Dismiss any existing overlays first so new action doesn't stack
+        dismissAllOverlays()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            switch action {
+            case "new-chat":
+                NotificationCenter.default.post(name: .openUINewChatWithFocus, object: nil)
+                ShortcutDonationService.donateNewChat()
+            default:
+                break
+            }
+        }
+    }
+}
+
+/// Root view that manages the full authentication flow using a phase-based state machine.
+struct RootView: View {
+    @Environment(AppDependencyContainer.self) private var dependencies
+    @Environment(AppRouter.self) private var router
+    @State private var showOnboarding = false
+    @State private var showSettings = false
+    @State private var hasAttemptedRestore = false
+
+    private var viewModel: AuthViewModel {
+        dependencies.authViewModel
+    }
+
+    var body: some View {
+        Group {
+            switch viewModel.phase {
+            case .serverConnection:
+                ServerConnectionView(viewModel: viewModel)
+
+            case .restoringSession:
+                // Show a lightweight loading/retry screen while validating the saved token
+                sessionRestoringView
+
+            case .authMethodSelection:
+                NavigationStack {
+                    AuthMethodSelectionView(viewModel: viewModel)
+                }
+
+            case .credentialLogin:
+                NavigationStack {
+                    LoginView(viewModel: viewModel)
+                }
+
+            case .signUp:
+                NavigationStack {
+                    SignUpView(viewModel: viewModel)
+                }
+
+            case .pendingApproval:
+                PendingApprovalView(viewModel: viewModel)
+
+            case .ldapLogin:
+                NavigationStack {
+                    LDAPLoginView(viewModel: viewModel)
+                }
+
+            case .ssoLogin:
+                NavigationStack {
+                    SSOAuthView(viewModel: viewModel)
+                }
+
+            case .authenticated:
+                authenticatedContent
+
+            case .serverSwitcher:
+                NavigationStack {
+                    ScrollView {
+                        SavedServersView(viewModel: viewModel, showAddServerButton: true)
+                    }
+                    .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+                    .navigationTitle("Switch Server")
+                    .navigationBarTitleDisplayMode(.inline)
+                }
+            }
+        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: viewModel.phase)
+        .task {
+            // Migrate single-token-per-server to multi-account structure (one-time).
+            viewModel.runLegacyMigrationIfNeeded()
+
+            guard !hasAttemptedRestore else { return }
+            hasAttemptedRestore = true
+
+            guard dependencies.serverConfigStore.activeServer != nil else { return }
+
+            switch viewModel.phase {
+            case .authenticated:
+                // Optimistic auth — user is already seeing the chat screen.
+                // Validate the token silently in the background.
+                await viewModel.validateSessionInBackground()
+            case .restoringSession:
+                // Have token but no cached user — must validate before showing chat.
+                await viewModel.restoreSession()
+            case .authMethodSelection:
+                // Signed out but server is saved — fetch backend config so that
+                // login/SSO options are populated correctly without requiring a reconnect.
+                await viewModel.fetchBackendConfigIfNeeded()
+            default:
+                break
+            }
+        }
+    }
+
+    /// Loading / retry view shown while restoring a saved session.
+    ///
+    /// When `AuthViewModel.restoreSession()` fails due to a transient error
+    /// (network down, 502, etc.) it stays in `.restoringSession` phase and
+    /// sets `errorMessage`. This view shows a retry button so the user can
+    /// try again without re-entering credentials.
+    private var sessionRestoringView: some View {
+        VStack(spacing: 20) {
+            if let error = viewModel.errorMessage {
+                // Connection failed — show error + retry
+                Image(systemName: "wifi.exclamationmark")
+                    .scaledFont(size: 44)
+                    .foregroundStyle(.secondary)
+
+                Text("Connection Issue")
+                    .font(.title3.weight(.semibold))
+
+                Text(error)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+
+                Button {
+                    Task {
+                        await viewModel.retrySessionRestore()
+                    }
+                } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                        .font(.body.weight(.medium))
+                        .frame(minWidth: 120)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 4)
+
+                Button("Sign in with different account") {
+                    viewModel.errorMessage = nil
+                    viewModel.phase = .authMethodSelection
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            } else {
+                // Normal loading state
+                ProgressView()
+                    .controlSize(.large)
+                Text("Connecting...")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private var authenticatedContent: some View {
+        Group {
+            if horizontalSizeClass == .regular {
+                iPadMainChatView()
+            } else {
+                MainChatView()
+            }
+        }
+        .overlay {
+            // Connection lost overlay — blocks interaction when server/internet is down
+            ConnectionOverlayView(monitor: dependencies.connectionMonitor)
+        }
+        .task {
+            // Start the connection monitor once the user is authenticated.
+            // This begins NWPathMonitor + /health polling.
+            dependencies.startServerConnectionMonitor()
+        }
+        .task {
+            // Check for app updates (App Store) and server updates in parallel.
+            // Runs once after authentication on every app launch.
+            async let appCheck: () = dependencies.updateChecker.checkForUpdates()
+            async let serverCheck: () = dependencies.serverUpdateChecker.checkForUpdates(using: dependencies.apiClient)
+            _ = await (appCheck, serverCheck)
+        }
+        .sheet(isPresented: Binding(
+            get: {
+                dependencies.updateChecker.availableUpdate != nil ||
+                dependencies.serverUpdateChecker.availableUpdate != nil
+            },
+            set: { isPresented in
+                if !isPresented {
+                    dependencies.updateChecker.dismissUpdate()
+                    dependencies.serverUpdateChecker.dismissUpdate()
+                }
+            }
+        )) {
+            CombinedUpdateSheet(
+                appUpdate: dependencies.updateChecker.availableUpdate,
+                serverUpdate: dependencies.serverUpdateChecker.availableUpdate,
+                onDismiss: {
+                    dependencies.updateChecker.dismissUpdate()
+                    dependencies.serverUpdateChecker.dismissUpdate()
+                }
+            )
+            .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+        }
+        .overlay(alignment: .topTrailing) {
+            // Floating pill shown when voice call is minimized.
+            // Compact 56×56 square anchored top-right — no Spacer/drag so
+            // the overlay only intercepts touches directly on the pill itself.
+            if router.isVoiceCallMinimized, let vm = router.voiceCallViewModel {
+                VoiceCallPillView(
+                    viewModel: vm,
+                    onExpand: {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                            router.expandVoiceCall()
+                        }
+                    },
+                    onEndCall: {
+                        Task {
+                            await vm.endCall()
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                router.dismissVoiceCall()
+                            }
+                        }
+                    }
+                )
+                .padding(.top, 56)
+                .padding(.trailing, 12)
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: router.isVoiceCallMinimized)
+            }
+        }
+        .fullScreenCover(isPresented: $showOnboarding) {
+                OnboardingView(
+                    userName: viewModel.currentUser?.displayName ?? "there"
+                ) {
+                    viewModel.markOnboardingSeen()
+                }
+            }
+            .onAppear {
+                // Show onboarding for first-time users
+                if !viewModel.hasShownOnboarding {
+                    showOnboarding = true
+                }
+
+                // Update widget data
+                WidgetCenter.shared.reloadAllTimelines()
+
+                // Update shared auth state
+                SharedDataService.shared.saveAuthState(
+                    isAuthenticated: true,
+                    userName: viewModel.currentUser?.displayName,
+                    serverURL: dependencies.serverConfigStore.activeServer?.url
+                )
+
+                // Prefetch the current user's avatar once so every UserAvatar
+                // view renders instantly without a shimmer flash.
+                // Only fires if a user + baseURL are known at this point;
+                // if restoreSession hasn't completed yet, the avatar is prefetched
+                // once currentUser becomes available via the .task block below.
+                if let userId = viewModel.currentUser?.id,
+                   let baseURL = dependencies.apiClient?.baseURL,
+                   !userId.isEmpty, !baseURL.isEmpty,
+                   let avatarURL = URL(string: "\(baseURL)/api/v1/users/\(userId)/profile/image?v=\(viewModel.profileImageVersion)") {
+                    Task {
+                        await ImageCacheService.shared.prefetchUserAvatar(
+                            url: avatarURL,
+                            authToken: dependencies.apiClient?.network.authToken
+                        )
+                    }
+                }
+            }
+    }
+}

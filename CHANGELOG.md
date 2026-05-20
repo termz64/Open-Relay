@@ -1,5 +1,20 @@
 # Changelog
 
+## v4.6 — May 20, 2026
+
+### What's New
+- Added Share Extension — share URLs, files, images, and documents from any app directly into Open Relay.
+- Added Face ID / Touch ID sign-in — after signing in once, tap the Face ID button on the login screen to authenticate instantly. Also allows full passwords support now!
+- Native Text Selection on macos - When using ipad version on mac, you are now freely able to select text just like you would in any other app. 
+
+### Improvements
+- Further stability improvements when loading into chats.
+- Improved password manager and iCloud Keychain AutoFill support on the sign-in screen.
+
+### Bug Fixes
+- Fixed the app signing you out when your server is temporarily unreachable — transient connectivity issues should no longer clear your session.
+
+
 ## v4.5.3 — May 18, 2026
 
 ### Bug Fixes

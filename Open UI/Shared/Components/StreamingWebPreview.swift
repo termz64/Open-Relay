@@ -136,11 +136,11 @@ struct StreamingWebPreview: UIViewRepresentable {
                     coord.pendingReconcileWorkItem?.cancel()
                     coord.pendingReconcileWorkItem = nil
                     let capturedContent = content
-                    Task.detached(priority: .userInitiated) { [weak webView] in
-                        let escaped = await Coordinator.escape(capturedContent)
-                        await MainActor.run {
-                            webView?.evaluateJavaScript("reconcileContent(`\(escaped)`)", completionHandler: nil)
-                        }
+                    Task { @MainActor [weak webView] in
+                        let escaped = await Task.detached(priority: .userInitiated) {
+                            Coordinator.escape(capturedContent)
+                        }.value
+                        _ = try? await webView?.evaluateJavaScript("reconcileContent(`\(escaped)`)")
                     }
                 } else {
                     // Too soon — buffer the latest content and schedule a flush
@@ -287,7 +287,7 @@ struct StreamingWebPreview: UIViewRepresentable {
         }
 
         /// Static wrapper so `webView(_:didFinish:)` can call it without capturing `self`.
-        static func escape(_ text: String) -> String {
+        nonisolated static func escape(_ text: String) -> String {
             text
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "`", with: "\\`")
@@ -564,5 +564,47 @@ struct StreamingWebPreview: UIViewRepresentable {
         </body>
         </html>
         """
+    }
+}
+
+// MARK: - Lazy Wrapper
+
+/// Wraps `StreamingWebPreview` with deferred WKWebView creation.
+///
+/// The underlying WKWebView — and its WebContent process — is not initialized
+/// until the view actually appears on screen. This prevents the main-thread
+/// "stampede" that occurs when opening a chat with multiple HTML/SVG/viz blocks:
+/// without this guard every WKWebView in the initial render window initializes
+/// simultaneously, blocking the main thread for several hundred milliseconds.
+///
+/// Use `LazyStreamingWebPreview` everywhere a `StreamingWebPreview` appears
+/// inside a scroll view. The caller controls the visible frame via the `height`
+/// binding exactly as before — the placeholder just keeps the space reserved.
+struct LazyStreamingWebPreview: View {
+    let content: String
+    let mode: StreamingWebRenderMode
+    let isStreaming: Bool
+    let isDark: Bool
+    @Binding var height: CGFloat
+
+    @State private var isVisible = false
+
+    var body: some View {
+        Group {
+            if isVisible {
+                StreamingWebPreview(
+                    content: content,
+                    mode: mode,
+                    isStreaming: isStreaming,
+                    isDark: isDark,
+                    height: $height
+                )
+            } else {
+                // Transparent placeholder — frame is always applied by the
+                // caller using the `height` binding, so layout is stable.
+                Color.clear
+                    .onAppear { isVisible = true }
+            }
+        }
     }
 }

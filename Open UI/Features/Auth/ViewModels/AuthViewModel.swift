@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import WebKit
 import os.log
 
@@ -438,6 +439,10 @@ final class AuthViewModel {
     // MARK: - Credential Login
 
     /// Logs in with email and password.
+    /// On success, if biometrics are available but no credentials are saved yet,
+    /// sets `pendingBiometricSaveCredentials` and pauses before advancing to `.authenticated`
+    /// so LoginView can show the "Save for Face ID?" alert while still in the view hierarchy.
+    /// LoginView must call `proceedToAuthenticated()` from both alert buttons to complete the transition.
     func login() async {
         guard let client = dependencies?.apiClient else {
             errorMessage = "No server configured."
@@ -453,11 +458,16 @@ final class AuthViewModel {
         errorMessage = nil
 
         do {
-            let user = try await client.login(email: email, password: password)
+            // Capture email/password BEFORE clearing them, in case we need to
+            // offer to save them for biometric login.
+            let capturedEmail = email
+            let capturedPassword = password
+
+            let user = try await client.login(email: capturedEmail, password: capturedPassword)
             currentUser = user
             // Check if user is in pending state — needs admin approval
             if user.role == .pending {
-                logger.info("Login: user is pending approval for \(self.email)")
+                logger.info("Login: user is pending approval for \(capturedEmail)")
                 phase = .pendingApproval
                 isLoggingIn = false
                 return
@@ -470,9 +480,25 @@ final class AuthViewModel {
             cacheCurrentUser()
             saveCurrentUserAsAccount(authType: .credentials)
             backendConfig = try? await client.getBackendConfig()
+
+            // Check if we should prompt to save credentials for biometric login.
+            // If yes, set pendingBiometricSaveCredentials and return WITHOUT advancing
+            // to .authenticated — LoginView will show the alert and call
+            // proceedToAuthenticated() once the user responds.
+            let keychain = KeychainService.shared
+            if keychain.isBiometricsAvailable,
+               !biometricLoginEnabled,
+               let serverURL = serverConfigStore.activeServer?.url,
+               !keychain.hasBiometricCredentials(forServer: serverURL) {
+                pendingBiometricSaveCredentials = (email: capturedEmail, password: capturedPassword)
+                isLoggingIn = false
+                logger.info("Login successful for \(capturedEmail) — waiting for biometric save prompt")
+                return
+            }
+
             phase = .authenticated
             startTokenRefreshTimer()
-            logger.info("Login successful for \(self.email)")
+            logger.info("Login successful for \(capturedEmail)")
         } catch {
             let apiError = APIError.from(error)
             if case .httpError(let code, let msg, _) = apiError {
@@ -490,6 +516,15 @@ final class AuthViewModel {
         }
 
         isLoggingIn = false
+    }
+
+    /// Completes the login flow by advancing to `.authenticated`.
+    /// Called by LoginView from both the "Save" and "Not Now" buttons of the
+    /// biometric save prompt, and whenever no biometric prompt is needed.
+    func proceedToAuthenticated() {
+        pendingBiometricSaveCredentials = nil
+        phase = .authenticated
+        startTokenRefreshTimer()
     }
 
     // MARK: - Sign Up
@@ -1618,9 +1653,140 @@ final class AuthViewModel {
         serverConfigStore.activeServer?.savedAccounts ?? []
     }
 
+    /// The URL of the currently active server, used by the login view to check biometric credentials.
+    var currentServerURL: String? {
+        serverConfigStore.activeServer?.url
+    }
+
     /// Whether the active server has multiple saved accounts.
     var hasMultipleAccounts: Bool {
         savedAccountsOnActiveServer.count > 1
+    }
+
+    // MARK: - Biometric Login
+
+    /// Holds the credentials captured just before `login()` clears the password field,
+    /// when we need to show a "Save for Face ID?" prompt BEFORE advancing to `.authenticated`.
+    /// LoginView observes this and shows the alert; both alert buttons call `proceedToAuthenticated()`.
+    var pendingBiometricSaveCredentials: (email: String, password: String)?
+
+    /// UserDefaults key for the biometric login enabled preference.
+    static let biometricLoginEnabledKey = "openui.biometric_login_enabled"
+
+    /// Whether biometric login (Face ID / Touch ID) is enabled.
+    var biometricLoginEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.biometricLoginEnabledKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.biometricLoginEnabledKey) }
+    }
+
+    /// Whether Face ID / Touch ID is available on this device AND credentials are saved
+    /// for the active server. Both must be true for the biometric button to appear.
+    var canUseBiometricLogin: Bool {
+        guard KeychainService.shared.isBiometricsAvailable,
+              let serverURL = serverConfigStore.activeServer?.url else { return false }
+        return biometricLoginEnabled && KeychainService.shared.hasBiometricCredentials(forServer: serverURL)
+    }
+
+    /// The biometric type name for the active device ("Face ID" / "Touch ID").
+    var biometricTypeName: String {
+        KeychainService.shared.biometricTypeName ?? "Biometrics"
+    }
+
+    /// Triggers biometric authentication and, if successful, fills in the credentials
+    /// and submits login automatically.
+    ///
+    /// The Keychain itself shows the Face ID / Touch ID prompt when we read the
+    /// protected item — so we don't need a separate `LAContext.evaluatePolicy` call.
+    func loginWithBiometrics() async {
+        guard let serverURL = serverConfigStore.activeServer?.url else {
+            errorMessage = "No server configured."
+            return
+        }
+
+        isLoggingIn = true
+        errorMessage = nil
+
+        // loadBiometricCredentials triggers the system biometric prompt
+        guard let credentials = KeychainService.shared.loadBiometricCredentials(
+            forServer: serverURL,
+            prompt: "Sign in to Open Relay"
+        ) else {
+            // User cancelled or biometrics failed — don't show an error,
+            // just let them use the manual form
+            isLoggingIn = false
+            return
+        }
+
+        // Fill in fields (visible feedback while logging in)
+        email = credentials.email
+        // Don't set password field — log in silently, don't display the password
+
+        do {
+            guard let client = dependencies?.apiClient else {
+                errorMessage = "No server configured."
+                isLoggingIn = false
+                return
+            }
+
+            let user = try await client.login(email: credentials.email, password: credentials.password)
+            currentUser = user
+            if user.role == .pending {
+                phase = .pendingApproval
+                isLoggingIn = false
+                return
+            }
+            dependencies?.activeChatStore.clear()
+            connectSocketWithToken()
+            cacheCurrentUser()
+            saveCurrentUserAsAccount(authType: .credentials)
+            backendConfig = try? await client.getBackendConfig()
+            phase = .authenticated
+            startTokenRefreshTimer()
+            logger.info("Biometric login successful for \(credentials.email)")
+        } catch {
+            let apiError = APIError.from(error)
+            if case .httpError(let code, let msg, _) = apiError {
+                if code == 401 {
+                    // Credentials may have changed — delete saved biometric credentials
+                    // so the user isn't stuck in a loop
+                    KeychainService.shared.deleteBiometricCredentials(forServer: serverURL)
+                    errorMessage = "Saved credentials are no longer valid. Please sign in manually."
+                } else if code == 403 {
+                    errorMessage = msg ?? "Account is not active. Contact your administrator."
+                } else {
+                    errorMessage = apiError.errorDescription
+                }
+            } else {
+                errorMessage = apiError.errorDescription
+            }
+            logger.error("Biometric login failed: \(error.localizedDescription)")
+        }
+
+        isLoggingIn = false
+    }
+
+    /// Saves credentials for biometric login after a successful manual sign-in.
+    /// Called from LoginView when the user taps "Save for Face ID / Touch ID".
+    func saveBiometricCredentials(email: String, password: String) {
+        guard let serverURL = serverConfigStore.activeServer?.url else { return }
+        let success = KeychainService.shared.saveBiometricCredentials(
+            email: email,
+            password: password,
+            forServer: serverURL
+        )
+        if success {
+            biometricLoginEnabled = true
+            logger.info("Biometric credentials saved for \(serverURL)")
+        } else {
+            logger.warning("Failed to save biometric credentials for \(serverURL)")
+        }
+    }
+
+    /// Removes saved biometric credentials for the active server.
+    func clearBiometricCredentials() {
+        guard let serverURL = serverConfigStore.activeServer?.url else { return }
+        KeychainService.shared.deleteBiometricCredentials(forServer: serverURL)
+        logger.info("Biometric credentials cleared for \(serverURL)")
     }
 
     /// Validates the current session in the background after an optimistic launch.

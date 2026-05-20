@@ -35,7 +35,7 @@ struct InlineVisualizerView: View {
         VStack(spacing: 0) {
             headerBar
             Divider()
-            StreamingWebPreview(
+            LazyStreamingWebPreview(
                 content: content,
                 mode: .html,
                 isStreaming: isStreaming,
