@@ -2688,7 +2688,27 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
-    /// Executes a command. Uses `wait=10` so short commands complete inline
+    /// Creates a new interactive PTY session on the terminal server.
+    /// Returns the session ID used to open the WebSocket connection.
+    /// POST `/api/v1/terminals/{serverId}/api/terminals`
+    func terminalCreateSession(serverId: String) async throws -> String {
+        let (data, _) = try await network.requestRaw(
+            path: "/api/v1/terminals/\(serverId)/api/terminals",
+            method: .post,
+            body: Data("{}".utf8)
+        )
+        // Response is {"id": "xxxx", ...}
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sessionId = json["id"] as? String else {
+            throw APIError.responseDecoding(
+                underlying: NSError(domain: "Terminal", code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing session id in response"]),
+                data: nil
+            )
+        }
+        return sessionId
+    }
+
     /// without requiring polling. Returns the process ID for long-running commands.
     func terminalExecute(serverId: String, command: String, cwd: String? = nil) async throws -> TerminalCommandResult {
         var body: [String: Any] = ["command": command]

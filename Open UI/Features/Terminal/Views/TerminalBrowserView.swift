@@ -1,14 +1,110 @@
 import SwiftUI
+import UIKit
+import SwiftTerm
 import UniformTypeIdentifiers
 import QuickLook
 
+// MARK: - SwiftTerm UIViewRepresentable
+
+/// Wraps SwiftTerm's `TerminalView` (a real VT100/xterm emulator) as a SwiftUI view.
+///
+/// - User types directly into the terminal — no separate text field.
+/// - `TerminalViewDelegate.send()` fires for every keypress and forwards bytes to the server.
+/// - The VM feeds server output back via `terminalView.feed(byteArray:)`.
+struct SwiftTermView: UIViewRepresentable {
+    let viewModel: TerminalBrowserViewModel
+
+    func makeUIView(context: Context) -> TerminalHostView {
+        let tv = TerminalHostView(frame: .zero)
+        tv.terminalDelegate = context.coordinator
+
+        tv.backgroundColor = UIColor.black
+        tv.nativeBackgroundColor = UIColor.black
+        tv.nativeForegroundColor = UIColor(red: 0.0, green: 0.92, blue: 0.0, alpha: 1.0)
+
+        viewModel.terminalView = tv
+        return tv
+    }
+
+    func updateUIView(_ uiView: TerminalHostView, context: Context) {
+        if viewModel.terminalView !== uiView {
+            viewModel.terminalView = uiView
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(viewModel: viewModel)
+    }
+
+    // MARK: - Coordinator (TerminalViewDelegate)
+
+    final class Coordinator: NSObject, TerminalViewDelegate {
+        let viewModel: TerminalBrowserViewModel
+
+        init(viewModel: TerminalBrowserViewModel) {
+            self.viewModel = viewModel
+        }
+
+        func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            Task { @MainActor in
+                self.viewModel.sendRawToServer(data)
+            }
+        }
+
+        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            Task { @MainActor in
+                self.viewModel.sendResize(cols: newCols, rows: newRows)
+            }
+        }
+        func setTerminalTitle(source: TerminalView, title: String) {}
+        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+        func scrolled(source: TerminalView, position: Double) {}
+        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
+        func bell(source: TerminalView) { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+        func clipboardCopy(source: TerminalView, content: Data) {
+            UIPasteboard.general.setData(content, forPasteboardType: "public.utf8-plain-text")
+        }
+        func clipboardRead(source: TerminalView) -> Data? {
+            UIPasteboard.general.data(forPasteboardType: "public.utf8-plain-text")
+        }
+        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+    }
+}
+
+/// A `TerminalView` subclass that auto-resizes its terminal on layout.
+final class TerminalHostView: TerminalView {
+    private var lastAppliedSize: CGSize = .zero
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        updateTerminalSize()
+    }
+
+    func updateTerminalSize() {
+        let newSize = bounds.size
+        guard newSize.width.isFinite, newSize.width > 0,
+              newSize.height.isFinite, newSize.height > 0,
+              newSize != lastAppliedSize else { return }
+        lastAppliedSize = newSize
+
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let cellWidth = max(1.0, ("M" as NSString).size(withAttributes: attrs).width)
+        let cellHeight = max(1.0, font.lineHeight * 1.2)
+
+        let cols = max(2, Int(newSize.width / cellWidth))
+        let rows = max(1, Int(newSize.height / cellHeight))
+
+        let curCols = getTerminal().cols
+        let curRows = getTerminal().rows
+        if cols != curCols || rows != curRows {
+            resize(cols: cols, rows: rows)
+        }
+    }
+}
+
 // MARK: - Terminal Browser View
 
-/// A slide-over file browser panel for the terminal server.
-///
-/// Displays a file list with breadcrumb navigation, action toolbar,
-/// and a mini terminal command runner at the bottom.
-/// Presented as an overlay panel that slides in from the right edge.
 struct TerminalBrowserView: View {
     @Bindable var viewModel: TerminalBrowserViewModel
     var onDismiss: () -> Void
@@ -18,54 +114,73 @@ struct TerminalBrowserView: View {
     @State private var previewFileURL: URL?
     @State private var shareFileURL: URL?
     @State private var confirmDeleteItem: TerminalFileItem?
-    @FocusState private var isCommandFocused: Bool
-    @State private var showFullscreenTerminal = false
+    @State private var isTerminalFullscreen = false
 
     var body: some View {
+        // Single VStack — SwiftTermView is always in the same structural position.
+        // We conditionally show/hide chrome around it to achieve fullscreen without
+        // recreating the TerminalView (which would break the WebSocket connection).
         VStack(spacing: 0) {
-            // Header
-            headerBar
-
-            Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
-
-            // Breadcrumb navigation
-            breadcrumbBar
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-
-            Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
-
-            // Action toolbar
-            actionToolbar
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-
-            Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
-
-            // File list
-            fileListArea
-
-            // Mini terminal
-            if viewModel.isTerminalExpanded {
+            // ── Fullscreen header (only visible in fullscreen) ──
+            if isTerminalFullscreen {
+                HStack {
+                    Button {
+                        isTerminalFullscreen = false
+                        Haptics.play(.light)
+                    } label: {
+                        Image(systemName: "arrow.down.right.and.arrow.up.left")
+                            .scaledFont(size: 14, weight: .semibold)
+                            .foregroundStyle(theme.brandPrimary)
+                            .frame(width: 32, height: 32)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                    Text("Terminal").scaledFont(size: 14, weight: .semibold).foregroundStyle(theme.textPrimary)
+                    Spacer()
+                    // Green dot when connected, nothing otherwise
+                    Group {
+                        if viewModel.isShellReady {
+                            Circle().fill(.green).frame(width: 6, height: 6)
+                        } else {
+                            Color.clear.frame(width: 6, height: 6)
+                        }
+                    }
+                    .frame(width: 32)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
                 Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
-                terminalSection
             }
 
-            // Terminal toggle bar
-            terminalToggleBar
+            // ── Normal file-browser chrome (hidden in fullscreen) ──
+            if !isTerminalFullscreen {
+                headerBar
+                Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
+                breadcrumbBar.padding(.horizontal, 12).padding(.vertical, 6)
+                Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
+                actionToolbar.padding(.horizontal, 12).padding(.vertical, 6)
+                Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
+                fileListArea
+            }
+
+            // ── Terminal section — always in same structural position ──
+            if isTerminalFullscreen || viewModel.isTerminalExpanded {
+                if !isTerminalFullscreen {
+                    Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
+                }
+                terminalPanel(fullscreen: isTerminalFullscreen)
+            }
+
+            // ── Toggle bar (hidden in fullscreen) ──
+            if !isTerminalFullscreen {
+                terminalToggleBar
+            }
         }
         .background(theme.background)
         .onChange(of: viewModel.isTerminalExpanded) { _, expanded in
-            if expanded && !viewModel.isShellReady && !viewModel.isShellStarting {
-                Task { await viewModel.startShell() }
-            }
+            if expanded { viewModel.reconnectIfNeeded() }
         }
-        .task {
-            await viewModel.loadDirectory()
-        }
-        .onDisappear {
-            // Don't stop the shell on disappear — keep session alive while panel is closed
-        }
+        .task { await viewModel.loadDirectory() }
         .alert("New Folder", isPresented: $viewModel.showNewFolderAlert) {
             TextField("Folder name", text: $viewModel.newFolderName)
             Button("Cancel", role: .cancel) { viewModel.newFolderName = "" }
@@ -77,50 +192,34 @@ struct TerminalBrowserView: View {
         }
         .confirmationDialog(
             "Delete \(confirmDeleteItem?.name ?? "")?",
-            isPresented: Binding(
-                get: { confirmDeleteItem != nil },
-                set: { if !$0 { confirmDeleteItem = nil } }
-            ),
+            isPresented: Binding(get: { confirmDeleteItem != nil }, set: { if !$0 { confirmDeleteItem = nil } }),
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                if let item = confirmDeleteItem {
-                    Task { await viewModel.deleteItem(item) }
-                }
+                if let item = confirmDeleteItem { Task { await viewModel.deleteItem(item) } }
                 confirmDeleteItem = nil
             }
-        } message: {
-            Text("This action cannot be undone.")
-        }
+        } message: { Text("This action cannot be undone.") }
         .sheet(isPresented: $showFilePicker) {
             TerminalDocumentPicker { urls in
                 for url in urls {
-                    let hasAccess = url.startAccessingSecurityScopedResource()
-                    defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
+                    let ok = url.startAccessingSecurityScopedResource()
+                    defer { if ok { url.stopAccessingSecurityScopedResource() } }
                     if let data = try? Data(contentsOf: url) {
-                        Task {
-                            await viewModel.uploadFile(data: data, fileName: url.lastPathComponent)
-                        }
+                        Task { await viewModel.uploadFile(data: data, fileName: url.lastPathComponent) }
                     }
                 }
             }
         }
         .quickLookPreview($previewFileURL)
-        .sheet(item: $shareFileURL) { url in
-            ShareSheetView(activityItems: [url])
-        }
-        .fullScreenCover(isPresented: $showFullscreenTerminal) {
-            TerminalFullscreenView(viewModel: viewModel)
-        }
+        .sheet(item: $shareFileURL) { url in ShareSheetView(activityItems: [url]) }
     }
 
     // MARK: - Header
 
     private var headerBar: some View {
         HStack {
-            Button {
-                onDismiss()
-            } label: {
+            Button { onDismiss() } label: {
                 Image(systemName: "xmark")
                     .scaledFont(size: 14, weight: .semibold)
                     .foregroundStyle(theme.textSecondary)
@@ -128,48 +227,31 @@ struct TerminalBrowserView: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-
             Spacer()
-
-            Text("Files")
-                .scaledFont(size: 16, weight: .bold)
-                .foregroundStyle(theme.textPrimary)
-
+            Text("Files").scaledFont(size: 16, weight: .bold).foregroundStyle(theme.textPrimary)
             Spacer()
-
-            // Placeholder for symmetry
             Color.clear.frame(width: 32, height: 32)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
-    // MARK: - Breadcrumb Navigation
+    // MARK: - Breadcrumb
 
     private var breadcrumbBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 ForEach(Array(viewModel.pathSegments.enumerated()), id: \.element.path) { index, segment in
                     if index > 0 {
-                        Image(systemName: "chevron.right")
-                            .scaledFont(size: 9, weight: .bold)
-                            .foregroundStyle(theme.textTertiary)
+                        Image(systemName: "chevron.right").scaledFont(size: 9, weight: .bold).foregroundStyle(theme.textTertiary)
                     }
-
                     Button {
-                        viewModel.navigateToPath(segment.path)
-                        Haptics.play(.light)
+                        viewModel.navigateToPath(segment.path); Haptics.play(.light)
                     } label: {
                         Text(segment.name)
                             .scaledFont(size: 13, weight: segment.path == viewModel.currentPath ? .bold : .medium)
                             .foregroundStyle(segment.path == viewModel.currentPath ? theme.brandPrimary : theme.textSecondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(
-                                segment.path == viewModel.currentPath
-                                    ? theme.brandPrimary.opacity(0.1)
-                                    : Color.clear
-                            )
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(segment.path == viewModel.currentPath ? theme.brandPrimary.opacity(0.1) : Color.clear)
                             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                     }
                     .buttonStyle(.plain)
@@ -182,45 +264,17 @@ struct TerminalBrowserView: View {
 
     private var actionToolbar: some View {
         HStack(spacing: 12) {
-            // Refresh
-            Button {
-                viewModel.refresh()
-                Haptics.play(.light)
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .scaledFont(size: 14, weight: .medium)
-                    .foregroundStyle(theme.textSecondary)
-            }
-            .buttonStyle(.plain)
-
-            // New folder
-            Button {
-                viewModel.showNewFolderAlert = true
-                Haptics.play(.light)
-            } label: {
-                Image(systemName: "folder.badge.plus")
-                    .scaledFont(size: 14, weight: .medium)
-                    .foregroundStyle(theme.textSecondary)
-            }
-            .buttonStyle(.plain)
-
-            // Upload
-            Button {
-                showFilePicker = true
-                Haptics.play(.light)
-            } label: {
-                Image(systemName: "arrow.up.doc")
-                    .scaledFont(size: 14, weight: .medium)
-                    .foregroundStyle(theme.textSecondary)
-            }
-            .buttonStyle(.plain)
-
+            Button { viewModel.refresh(); Haptics.play(.light) } label: {
+                Image(systemName: "arrow.clockwise").scaledFont(size: 14, weight: .medium).foregroundStyle(theme.textSecondary)
+            }.buttonStyle(.plain)
+            Button { viewModel.showNewFolderAlert = true; Haptics.play(.light) } label: {
+                Image(systemName: "folder.badge.plus").scaledFont(size: 14, weight: .medium).foregroundStyle(theme.textSecondary)
+            }.buttonStyle(.plain)
+            Button { showFilePicker = true; Haptics.play(.light) } label: {
+                Image(systemName: "arrow.up.doc").scaledFont(size: 14, weight: .medium).foregroundStyle(theme.textSecondary)
+            }.buttonStyle(.plain)
             Spacer()
-
-            // Item count
-            Text("\(viewModel.items.count) items")
-                .scaledFont(size: 12, weight: .medium)
-                .foregroundStyle(theme.textTertiary)
+            Text("\(viewModel.items.count) items").scaledFont(size: 12, weight: .medium).foregroundStyle(theme.textTertiary)
         }
     }
 
@@ -230,44 +284,23 @@ struct TerminalBrowserView: View {
         Group {
             if viewModel.isLoading && viewModel.items.isEmpty {
                 VStack(spacing: 12) {
-                    Spacer()
-                    ProgressView()
-                        .controlSize(.regular)
-                    Text("Loading...")
-                        .scaledFont(size: 13)
-                        .foregroundStyle(theme.textTertiary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                    Spacer(); ProgressView(); Text("Loading...").scaledFont(size: 13).foregroundStyle(theme.textTertiary); Spacer()
+                }.frame(maxWidth: .infinity)
             } else if let error = viewModel.errorMessage {
                 VStack(spacing: 12) {
                     Spacer()
-                    Image(systemName: "exclamationmark.triangle")
-                        .scaledFont(size: 28)
-                        .foregroundStyle(theme.error)
-                    Text(error)
-                        .scaledFont(size: 13)
-                        .foregroundStyle(theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                    Button("Retry") { viewModel.refresh() }
-                        .scaledFont(size: 13, weight: .semibold)
-                        .foregroundStyle(theme.brandPrimary)
+                    Image(systemName: "exclamationmark.triangle").scaledFont(size: 28).foregroundStyle(theme.error)
+                    Text(error).scaledFont(size: 13).foregroundStyle(theme.textSecondary).multilineTextAlignment(.center).padding(.horizontal)
+                    Button("Retry") { viewModel.refresh() }.scaledFont(size: 13, weight: .semibold).foregroundStyle(theme.brandPrimary)
                     Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                }.frame(maxWidth: .infinity)
             } else if viewModel.sortedItems.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
-                    Image(systemName: "folder")
-                        .scaledFont(size: 28)
-                        .foregroundStyle(theme.textTertiary)
-                    Text("Empty directory")
-                        .scaledFont(size: 13)
-                        .foregroundStyle(theme.textTertiary)
+                    Image(systemName: "folder").scaledFont(size: 28).foregroundStyle(theme.textTertiary)
+                    Text("Empty directory").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
                     Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                }.frame(maxWidth: .infinity)
             } else {
                 List {
                     ForEach(viewModel.sortedItems) { item in
@@ -283,163 +316,69 @@ struct TerminalBrowserView: View {
         }
     }
 
-    // MARK: - File Row
-
     private func fileRow(_ item: TerminalFileItem) -> some View {
         Button {
-            if item.isDirectory {
-                viewModel.navigateToDirectory(item.path)
-                Haptics.play(.light)
-            } else {
-                // Preview file
-                Task {
-                    if let url = await viewModel.downloadFile(item) {
-                        previewFileURL = url
-                    }
-                }
-            }
+            if item.isDirectory { viewModel.navigateToDirectory(item.path); Haptics.play(.light) }
+            else { Task { if let url = await viewModel.downloadFile(item) { previewFileURL = url } } }
         } label: {
             HStack(spacing: 10) {
-                // Icon
                 Image(systemName: item.iconName)
                     .scaledFont(size: 18)
                     .foregroundStyle(item.isDirectory ? theme.brandPrimary : iconColor(for: item))
                     .frame(width: 28)
-
-                // Name + details
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(item.name)
-                        .scaledFont(size: 14, weight: item.isDirectory ? .semibold : .regular)
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(1)
-
-                    if let size = item.formattedSize {
-                        Text(size)
-                            .scaledFont(size: 11)
-                            .foregroundStyle(theme.textTertiary)
-                    }
+                    Text(item.name).scaledFont(size: 14, weight: item.isDirectory ? .semibold : .regular).foregroundStyle(theme.textPrimary).lineLimit(1)
+                    if let size = item.formattedSize { Text(size).scaledFont(size: 11).foregroundStyle(theme.textTertiary) }
                 }
-
                 Spacer()
-
-                if item.isDirectory {
-                    Image(systemName: "chevron.right")
-                        .scaledFont(size: 11, weight: .semibold)
-                        .foregroundStyle(theme.textTertiary)
-                }
+                if item.isDirectory { Image(systemName: "chevron.right").scaledFont(size: 11, weight: .semibold).foregroundStyle(theme.textTertiary) }
             }
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
+            .padding(.vertical, 4).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(role: .destructive) {
-                confirmDeleteItem = item
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
-
+            Button(role: .destructive) { confirmDeleteItem = item } label: { Label("Delete", systemImage: "trash") }
             if !item.isDirectory {
-                Button {
-                    Task {
-                        if let url = await viewModel.downloadFile(item) {
-                            shareFileURL = url
-                        }
-                    }
-                } label: {
-                    Label("Download", systemImage: "arrow.down.circle")
-                }
-                .tint(theme.brandPrimary)
+                Button { Task { if let url = await viewModel.downloadFile(item) { shareFileURL = url } } } label: { Label("Download", systemImage: "arrow.down.circle") }.tint(theme.brandPrimary)
             }
         }
         .contextMenu {
             if !item.isDirectory {
-                Button {
-                    Task {
-                        if let url = await viewModel.downloadFile(item) {
-                            previewFileURL = url
-                        }
-                    }
-                } label: {
-                    Label("Preview", systemImage: "eye")
-                }
-
-                Button {
-                    Task {
-                        if let url = await viewModel.downloadFile(item) {
-                            shareFileURL = url
-                        }
-                    }
-                } label: {
-                    Label("Download", systemImage: "arrow.down.circle")
-                }
+                Button { Task { if let url = await viewModel.downloadFile(item) { previewFileURL = url } } } label: { Label("Preview", systemImage: "eye") }
+                Button { Task { if let url = await viewModel.downloadFile(item) { shareFileURL = url } } } label: { Label("Download", systemImage: "arrow.down.circle") }
             }
-
-            Button {
-                UIPasteboard.general.string = item.path
-                Haptics.notify(.success)
-            } label: {
-                Label("Copy Path", systemImage: "doc.on.doc")
-            }
-
+            Button { UIPasteboard.general.string = item.path; Haptics.notify(.success) } label: { Label("Copy Path", systemImage: "doc.on.doc") }
             Divider()
-
-            Button(role: .destructive) {
-                confirmDeleteItem = item
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
+            Button(role: .destructive) { confirmDeleteItem = item } label: { Label("Delete", systemImage: "trash") }
         }
     }
 
-    private func iconColor(for item: TerminalFileItem) -> Color {
+    private func iconColor(for item: TerminalFileItem) -> SwiftUI.Color {
         switch item.fileExtension {
-        case "py", "js", "ts", "swift", "java", "cpp", "c", "go", "rs", "rb":
-            return .orange
-        case "json", "yaml", "yml", "xml", "toml":
-            return .purple
-        case "md", "txt", "log":
-            return theme.textSecondary
-        case "png", "jpg", "jpeg", "gif", "svg":
-            return .green
-        case "pdf":
-            return .red
-        case "sh", "bash", "zsh":
-            return .green
-        default:
-            return theme.textTertiary
+        case "py", "js", "ts", "swift", "java", "cpp", "c", "go", "rs", "rb": return .orange
+        case "json", "yaml", "yml", "xml", "toml": return .purple
+        case "md", "txt", "log": return theme.textSecondary
+        case "png", "jpg", "jpeg", "gif", "svg": return .green
+        case "pdf": return .red
+        case "sh", "bash", "zsh": return .green
+        default: return theme.textTertiary
         }
     }
 
-    // MARK: - Terminal Toggle
+    // MARK: - Terminal Toggle Bar
 
     private var terminalToggleBar: some View {
         Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                viewModel.isTerminalExpanded.toggle()
-            }
-            if viewModel.isTerminalExpanded {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    isCommandFocused = true
-                }
-            }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { viewModel.isTerminalExpanded.toggle() }
             Haptics.play(.light)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: "terminal")
-                    .scaledFont(size: 13, weight: .semibold)
-                Text("Terminal")
-                    .scaledFont(size: 13, weight: .semibold)
+                Image(systemName: "terminal").scaledFont(size: 13, weight: .semibold)
+                Text("Terminal").scaledFont(size: 13, weight: .semibold)
 
-                if viewModel.isShellStarting {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .padding(.leading, 2)
-                } else if viewModel.isShellReady {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 6, height: 6)
-                        .padding(.leading, 2)
+                // Only show green dot when connected — no spinner or orange dot
+                if viewModel.isShellReady {
+                    Circle().fill(.green).frame(width: 6, height: 6).padding(.leading, 2)
                 }
 
                 Spacer()
@@ -447,250 +386,73 @@ struct TerminalBrowserView: View {
                     .scaledFont(size: 11, weight: .bold)
             }
             .foregroundStyle(viewModel.isTerminalExpanded ? theme.brandPrimary : theme.textSecondary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 14).padding(.vertical, 10)
             .background(theme.surfaceContainer.opacity(0.5))
         }
         .buttonStyle(.plain)
     }
 
-    // MARK: - Terminal Section (mini, inside the panel)
+    // MARK: - Terminal Panel (shared between normal and fullscreen)
 
-    private var terminalSection: some View {
-        TerminalContentView(
-            viewModel: viewModel,
-            isFullscreen: false,
-            onExpand: { showFullscreenTerminal = true }
-        )
-    }
-}
-
-// MARK: - Shared Terminal Content View
-
-/// The reusable terminal output + shortcut bar + input row.
-/// Used both in the mini panel and the fullscreen cover.
-struct TerminalContentView: View {
-    @Bindable var viewModel: TerminalBrowserViewModel
-    var isFullscreen: Bool
-    var onExpand: (() -> Void)? = nil
-
-    @Environment(\.theme) private var theme
-
-    var body: some View {
+    private func terminalPanel(fullscreen: Bool) -> some View {
         VStack(spacing: 0) {
             // Toolbar row
-            terminalToolbar
+            HStack(spacing: 0) {
+                Spacer()
 
-            // Shell output
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(viewModel.shellOutput.isEmpty ? " " : viewModel.shellOutput)
-                        .scaledFont(size: 12, design: .monospaced)
-                        .foregroundStyle(Color.green.opacity(0.9))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .id("output")
+                if !viewModel.isShellReady && !viewModel.isShellStarting {
+                    Button {
+                        Task { await viewModel.startShell() }; Haptics.play(.light)
+                    } label: {
+                        Label("Restart", systemImage: "arrow.clockwise")
+                            .scaledFont(size: 11, weight: .medium).foregroundStyle(theme.brandPrimary)
+                    }
+                    .buttonStyle(.plain).padding(.trailing, 12).padding(.vertical, 4)
                 }
+
+                Button {
+                    viewModel.clearTerminal(); Haptics.play(.light)
+                } label: {
+                    Label("Clear", systemImage: "trash")
+                        .scaledFont(size: 11, weight: .medium).foregroundStyle(theme.textTertiary)
+                }
+                .buttonStyle(.plain).padding(.trailing, 12).padding(.vertical, 4)
+
+                if !fullscreen {
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            isTerminalFullscreen = true
+                        }
+                        Haptics.play(.light)
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .scaledFont(size: 13, weight: .medium).foregroundStyle(theme.textSecondary)
+                    }
+                    .buttonStyle(.plain).padding(.trailing, 12).padding(.vertical, 4)
+                    .accessibilityLabel("Expand terminal")
+                }
+            }
+            .background(Color.black.opacity(0.15))
+
+            // The real terminal — user types directly here
+            // SwiftTerm's built-in keyboard accessory provides Tab, arrows, Ctrl keys
+            SwiftTermView(viewModel: viewModel)
                 .frame(
-                    minHeight: isFullscreen ? 0 : 200,
-                    maxHeight: isFullscreen ? .infinity : 350
+                    minHeight: fullscreen ? 0 : 200,
+                    maxHeight: fullscreen ? .infinity : 350
                 )
-                .background(Color.black.opacity(0.85))
-                .onChange(of: viewModel.outputScrollToken) { _, _ in
-                    proxy.scrollTo("output", anchor: .bottom)
-                }
-            }
-
-            // Quick-action shortcut buttons
-            shortcutBar
-
-            // Input row
-            inputRow
-        }
-    }
-
-    // MARK: Toolbar
-
-    private var terminalToolbar: some View {
-        HStack(spacing: 0) {
-            Spacer()
-
-            // Restart button (only when shell is dead)
-            if !viewModel.isShellReady && !viewModel.isShellStarting {
-                Button {
-                    Task { await viewModel.startShell() }
-                    Haptics.play(.light)
-                } label: {
-                    Label("Restart", systemImage: "arrow.clockwise")
-                        .scaledFont(size: 11, weight: .medium)
-                        .foregroundStyle(theme.brandPrimary)
-                }
-                .buttonStyle(.plain)
-                .padding(.trailing, 12)
-                .padding(.vertical, 4)
-            }
-
-            // Clear button
-            Button {
-                viewModel.clearOutput()
-                Haptics.play(.light)
-            } label: {
-                Label("Clear", systemImage: "trash")
-                    .scaledFont(size: 11, weight: .medium)
-                    .foregroundStyle(theme.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .padding(.trailing, 12)
-            .padding(.vertical, 4)
-
-            // Expand / collapse button
-            if let onExpand, !isFullscreen {
-                Button {
-                    onExpand()
-                    Haptics.play(.light)
-                } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .scaledFont(size: 13, weight: .medium)
-                        .foregroundStyle(theme.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .padding(.trailing, 12)
-                .padding(.vertical, 4)
-                .accessibilityLabel("Expand terminal")
-            }
-        }
-        .background(Color.black.opacity(0.15))
-    }
-
-    // MARK: Shortcut Bar
-
-    private var shortcutBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                shortcutButton("⇥ Tab") {
-                    let current = viewModel.commandInput
-                    viewModel.commandInput = ""
-                    viewModel.sendRawInput(current + "\t")
-                }
-                shortcutButton("↑") {
-                    viewModel.navigateHistory(up: true)
-                }
-                shortcutButton("↓") {
-                    viewModel.navigateHistory(up: false)
-                }
-                shortcutButton("⌃L Clear") {
-                    viewModel.clearOutput()
-                    viewModel.sendRawInput("\u{0C}") // FF / Ctrl+L
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-        }
-        .background(Color.black.opacity(0.6))
-    }
-
-    private func shortcutButton(_ label: String, action: @escaping () -> Void) -> some View {
-        Button {
-            action()
-            Haptics.play(.light)
-        } label: {
-            Text(label)
-                .scaledFont(size: 12, weight: .semibold, design: .monospaced)
-                .foregroundStyle(.white.opacity(0.85))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.white.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .disabled(!viewModel.isShellReady)
-    }
-
-    // MARK: Input Row
-
-    private var inputRow: some View {
-        HStack(spacing: 8) {
-            Text(viewModel.isShellReady ? "$" : "…")
-                .scaledFont(size: 14, design: .monospaced)
-                .foregroundStyle(viewModel.isShellReady ? .green : .yellow)
-
-            TerminalTextField(
-                text: $viewModel.commandInput,
-                textColor: UIColor.white,
-                onReturn: {
-                    let input = viewModel.commandInput
-                    viewModel.sendInput(input)
-                }
-            )
-            .frame(height: 28)
-            .disabled(!viewModel.isShellReady)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color.black.opacity(0.2))
-    }
-}
-
-// MARK: - Fullscreen Terminal View
-
-/// Full-screen terminal presented via `.fullScreenCover`.
-struct TerminalFullscreenView: View {
-    @Bindable var viewModel: TerminalBrowserViewModel
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        NavigationStack {
-            TerminalContentView(viewModel: viewModel, isFullscreen: true)
-                .background(Color.black)
-                .navigationTitle("Terminal")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button {
-                            dismiss()
-                        } label: {
-                            Image(systemName: "arrow.down.right.and.arrow.up.left")
-                                .scaledFont(size: 14, weight: .semibold)
-                                .foregroundStyle(theme.brandPrimary)
-                        }
-                        .accessibilityLabel("Collapse terminal")
-                    }
-
-                    ToolbarItem(placement: .topBarTrailing) {
-                        HStack(spacing: 4) {
-                            if viewModel.isShellStarting {
-                                ProgressView().controlSize(.mini)
-                            } else if viewModel.isShellReady {
-                                Circle()
-                                    .fill(.green)
-                                    .frame(width: 7, height: 7)
-                            } else {
-                                Circle()
-                                    .fill(.orange)
-                                    .frame(width: 7, height: 7)
-                            }
-                        }
-                    }
-                }
         }
     }
 }
 
 // MARK: - Slide-Over Panel Container
 
-/// A container that presents the terminal browser as a right-edge slide-over panel.
-/// Manages the open/close animation and background dimming.
 struct TerminalSlideOverPanel: View {
     @Binding var isOpen: Bool
     @Bindable var viewModel: TerminalBrowserViewModel
 
     @Environment(\.theme) private var theme
     @GestureState private var dragOffset: CGFloat = 0
-
-    /// Panel width as percentage of screen.
     private let panelWidthRatio: CGFloat = 0.85
 
     var body: some View {
@@ -699,54 +461,33 @@ struct TerminalSlideOverPanel: View {
             let offsetX = isOpen ? 0 : panelWidth
 
             ZStack(alignment: .trailing) {
-                // Dim background
                 if isOpen {
-                    Color.black.opacity(0.35)
-                        .ignoresSafeArea()
+                    Color.black.opacity(0.35).ignoresSafeArea()
                         .onTapGesture {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                                isOpen = false
-                            }
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { isOpen = false }
                         }
                         .transition(.opacity)
                 }
 
-                // Panel
                 TerminalBrowserView(
                     viewModel: viewModel,
-                    onDismiss: {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                            isOpen = false
-                        }
-                    }
+                    onDismiss: { withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { isOpen = false } }
                 )
                 .frame(width: panelWidth)
                 .background(theme.background)
-                .clipShape(
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: 16,
-                        bottomLeadingRadius: 16,
-                        bottomTrailingRadius: 0,
-                        topTrailingRadius: 0,
-                        style: .continuous
-                    )
-                )
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: 16, bottomTrailingRadius: 0, topTrailingRadius: 0, style: .continuous))
                 .shadow(color: .black.opacity(0.25), radius: 20, x: -5)
                 .offset(x: max(0, offsetX + dragOffset))
+                .onChange(of: isOpen) { _, open in
+                    // Auto-reconnect the shell whenever the panel slides open
+                    if open { viewModel.reconnectIfNeeded() }
+                }
                 .gesture(
                     DragGesture()
-                        .updating($dragOffset) { value, state, _ in
-                            // Only allow dragging right (to dismiss)
-                            if value.translation.width > 0 {
-                                state = value.translation.width
-                            }
-                        }
+                        .updating($dragOffset) { value, state, _ in if value.translation.width > 0 { state = value.translation.width } }
                         .onEnded { value in
-                            // If dragged more than 30% of panel width, dismiss
                             if value.translation.width > panelWidth * 0.3 {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                                    isOpen = false
-                                }
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { isOpen = false }
                             }
                         }
                 )
@@ -758,28 +499,19 @@ struct TerminalSlideOverPanel: View {
 
 // MARK: - Right Edge Swipe Gesture
 
-/// A UIViewRepresentable that detects right-edge swipe gestures.
-/// Triggers the file browser panel when the user swipes from the right edge.
 struct RightEdgeSwipeGesture: UIViewRepresentable {
     var isEnabled: Bool
     var onSwipe: () -> Void
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onSwipe: onSwipe)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(onSwipe: onSwipe) }
 
     func makeUIView(context: Context) -> UIView {
         let view = UIView(frame: .zero)
         view.isUserInteractionEnabled = true
-
-        let edgeGesture = UIScreenEdgePanGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handleEdgeSwipe(_:))
-        )
+        let edgeGesture = UIScreenEdgePanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleEdgeSwipe(_:)))
         edgeGesture.edges = .right
         view.addGestureRecognizer(edgeGesture)
         context.coordinator.gesture = edgeGesture
-
         return view
     }
 
@@ -791,22 +523,15 @@ struct RightEdgeSwipeGesture: UIViewRepresentable {
     class Coordinator: NSObject {
         var onSwipe: () -> Void
         weak var gesture: UIScreenEdgePanGestureRecognizer?
-
-        init(onSwipe: @escaping () -> Void) {
-            self.onSwipe = onSwipe
-        }
-
+        init(onSwipe: @escaping () -> Void) { self.onSwipe = onSwipe }
         @objc func handleEdgeSwipe(_ recognizer: UIScreenEdgePanGestureRecognizer) {
-            if recognizer.state == .recognized {
-                onSwipe()
-            }
+            if recognizer.state == .recognized { onSwipe() }
         }
     }
 }
 
-// MARK: - Helper Views
+// MARK: - Document Picker
 
-/// Document picker for terminal file upload.
 private struct TerminalDocumentPicker: UIViewControllerRepresentable {
     let onPick: ([URL]) -> Void
 
@@ -824,68 +549,5 @@ private struct TerminalDocumentPicker: UIViewControllerRepresentable {
         let onPick: ([URL]) -> Void
         init(onPick: @escaping ([URL]) -> Void) { self.onPick = onPick }
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { onPick(urls) }
-    }
-}
-
-/// A UIKit-backed text field for the terminal command input.
-///
-/// Uses `UITextField` directly so we can intercept the return key via
-/// `textFieldShouldReturn` and return `false` — this executes the command
-/// **without** dismissing the keyboard, which SwiftUI's `TextField.onSubmit`
-/// cannot do.
-struct TerminalTextField: UIViewRepresentable {
-    @Binding var text: String
-    var textColor: UIColor
-    var onReturn: () -> Void
-
-    func makeUIView(context: Context) -> UITextField {
-        let field = UITextField()
-        field.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
-        field.textColor = textColor
-        field.tintColor = textColor
-        field.attributedPlaceholder = NSAttributedString(
-            string: "command…",
-            attributes: [.foregroundColor: UIColor.secondaryLabel]
-        )
-        field.autocapitalizationType = .none
-        field.autocorrectionType = .no
-        field.spellCheckingType = .no
-        field.returnKeyType = .default
-        field.keyboardAppearance = .dark
-        field.delegate = context.coordinator
-        field.addTarget(context.coordinator, action: #selector(Coordinator.textChanged(_:)), for: .editingChanged)
-        return field
-    }
-
-    func updateUIView(_ field: UITextField, context: Context) {
-        // Only update text if it actually changed (avoid cursor jump)
-        if field.text != text {
-            field.text = text
-        }
-        field.textColor = textColor
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onReturn: onReturn)
-    }
-
-    class Coordinator: NSObject, UITextFieldDelegate {
-        @Binding var text: String
-        var onReturn: () -> Void
-
-        init(text: Binding<String>, onReturn: @escaping () -> Void) {
-            _text = text
-            self.onReturn = onReturn
-        }
-
-        @objc func textChanged(_ field: UITextField) {
-            text = field.text ?? ""
-        }
-
-        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-            // Execute command, keep keyboard open
-            onReturn()
-            return false
-        }
     }
 }

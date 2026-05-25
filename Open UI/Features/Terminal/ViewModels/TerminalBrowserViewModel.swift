@@ -1,55 +1,51 @@
 import Foundation
+import UIKit
+import SwiftTerm
 import os.log
 
-/// Manages the state for the terminal file browser panel.
+/// Manages state for the terminal file browser panel.
 ///
-/// Handles directory navigation, file operations (create, delete, upload, download),
-/// and a **persistent bash shell session** on the terminal server.
+/// Shell sessions use a **WebSocket** connection that mirrors exactly what the web
+/// UI does. No HTTP polling — characters appear instantly.
 ///
-/// The terminal works like a real terminal window: one bash process is started when
-/// the terminal opens, and all subsequent input is sent as stdin to that process via
-/// `POST /execute/{processId}/input`. This matches the Open WebUI web interface
-/// behaviour where each terminal window is a single persistent session.
+/// Protocol (matches web UI's inspector traffic):
+///   1. POST  /api/v1/terminals/{serverId}/api/terminals            → `{"id": "xxxx"}`
+///   2. WS    wss(s)://{server}/api/v1/terminals/{serverId}/api/terminals/{id}
+///   3. Send  text  `{"type":"auth","token":"<jwt>"}`
+///   4. Send  text  `{"type":"resize","cols":N,"rows":M}`
+///   5. Recv  binary frames  → feed to SwiftTerm
+///   6. Send  binary frames  ← from SwiftTerm keystrokes
+///   7. Send  text  `{"type":"ping"}`  every 25 s (keepalive)
+///
+/// Auto-reconnect: on disconnect the VM waits 1 s, 2 s, 4 s before giving up.
+/// Calling `reconnectIfNeeded()` (e.g. when the panel becomes visible) triggers
+/// an immediate reconnect attempt regardless of retry state.
 @MainActor @Observable
 final class TerminalBrowserViewModel {
     // MARK: - File Browser State
 
-    /// Current directory path being viewed.
     var currentPath: String = "/home/user"
-    /// Files and folders in the current directory.
     var items: [TerminalFileItem] = []
-    /// Whether we're loading directory contents.
     var isLoading: Bool = false
-    /// Error message to display.
     var errorMessage: String?
-    /// Navigation history for back navigation.
     var pathHistory: [String] = []
 
     // MARK: - Shell Session State
 
-    /// Current command input text.
-    var commandInput: String = ""
-    /// Full terminal output accumulated since the session started.
-    var shellOutput: String = ""
-    /// Whether the shell session is in the process of being started.
     var isShellStarting: Bool = false
-    /// Whether the shell process is currently running (ready for input).
     var isShellReady: Bool = false
-    /// Whether the terminal section is expanded.
     var isTerminalExpanded: Bool = false
-    /// Token used to force the scroll view to snap to the latest output.
-    var outputScrollToken: Int = 0
 
     // MARK: - Action State
 
-    /// Whether the new folder alert is showing.
     var showNewFolderAlert: Bool = false
-    /// New folder name input.
     var newFolderName: String = ""
-    /// File being renamed (nil = not renaming).
     var renamingFile: TerminalFileItem?
-    /// New name for the file being renamed.
     var renameText: String = ""
+
+    // MARK: - SwiftTerm Bridge
+
+    weak var terminalView: TerminalView?
 
     // MARK: - Private
 
@@ -57,23 +53,31 @@ final class TerminalBrowserViewModel {
     private var serverId: String = ""
     private let logger = Logger(subsystem: "com.openui", category: "TerminalBrowser")
 
-    /// The process ID of the currently running bash shell.
-    private var shellProcessId: String?
-    /// Background task that continuously polls the shell for new output.
-    private var shellPollingTask: Task<Void, Never>?
-    /// The next offset to use when polling for shell output.
-    private var shellOutputOffset: Int = 0
+    // WebSocket state
+    private var wsTask: URLSessionWebSocketTask?
+    private var wsSession: URLSession?
+    private var wsReceiveTask: Task<Void, Never>?
+    private var wsPingTask: Task<Void, Never>?
+    private var terminalSessionId: String?
 
-    // MARK: - Command History
+    // Auto-reconnect
+    private var autoReconnectTask: Task<Void, Never>?
+    private var reconnectAttempt: Int = 0
+    private static let maxReconnectAttempts = 5
+    private static let reconnectDelays: [UInt64] = [
+        1_000_000_000,   // 1 s
+        2_000_000_000,   // 2 s
+        4_000_000_000,   // 4 s
+        8_000_000_000,   // 8 s
+        15_000_000_000,  // 15 s
+    ]
 
-    /// Ordered list of previously entered commands (most recent last).
-    var commandHistory: [String] = []
-    /// Current position while navigating history (-1 = not navigating).
-    var historyIndex: Int = -1
+    // Terminal dimensions (updated by TerminalHostView on layout)
+    var terminalCols: Int = 120
+    var terminalRows: Int = 24
 
     // MARK: - Computed
 
-    /// Path segments for breadcrumb navigation.
     var pathSegments: [(name: String, path: String)] {
         let components = currentPath.split(separator: "/").map(String.init)
         var segments: [(name: String, path: String)] = [("/", "/")]
@@ -85,7 +89,6 @@ final class TerminalBrowserViewModel {
         return segments
     }
 
-    /// Sorted items: directories first, then files, both alphabetically.
     var sortedItems: [TerminalFileItem] {
         let dirs = items.filter(\.isDirectory).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         let files = items.filter { !$0.isDirectory }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -95,40 +98,32 @@ final class TerminalBrowserViewModel {
     // MARK: - Setup
 
     func configure(apiClient: APIClient, serverId: String) {
+        if self.serverId == serverId, isShellReady { return }
         self.apiClient = apiClient
         self.serverId = serverId
-        // Eagerly warm the shell so it's ready before the user opens the terminal panel.
-        Task { await startShell() }
     }
 
-    /// Resets all state to defaults. Called when switching to a new chat
-    /// so the file browser starts fresh.
     func reset() {
-        // Cancel the persistent shell before clearing state
-        stopShell()
-
+        cancelAutoReconnect()
+        disconnectWebSocket()
         currentPath = "/home/user"
         items = []
         isLoading = false
         errorMessage = nil
         pathHistory = []
-        commandInput = ""
-        shellOutput = ""
         isShellStarting = false
         isShellReady = false
         isTerminalExpanded = false
-        outputScrollToken = 0
         showNewFolderAlert = false
         newFolderName = ""
         renamingFile = nil
         renameText = ""
-        commandHistory = []
-        historyIndex = -1
+        terminalView = nil
+        reconnectAttempt = 0
     }
 
     // MARK: - Navigation
 
-    /// Loads the contents of the current directory.
     func loadDirectory() async {
         guard let apiClient, !serverId.isEmpty else { return }
         isLoading = true
@@ -143,14 +138,12 @@ final class TerminalBrowserViewModel {
         isLoading = false
     }
 
-    /// Navigates into a directory.
     func navigateToDirectory(_ path: String) {
         pathHistory.append(currentPath)
         currentPath = path
         Task { await loadDirectory() }
     }
 
-    /// Navigates to a specific path segment (breadcrumb tap).
     func navigateToPath(_ path: String) {
         guard path != currentPath else { return }
         pathHistory.append(currentPath)
@@ -158,26 +151,21 @@ final class TerminalBrowserViewModel {
         Task { await loadDirectory() }
     }
 
-    /// Navigates back to the previous directory.
     func navigateBack() {
         guard let previous = pathHistory.popLast() else { return }
         currentPath = previous
         Task { await loadDirectory() }
     }
 
-    /// Refreshes the current directory.
     func refresh() {
         Task { await loadDirectory() }
     }
 
     // MARK: - File Operations
 
-    /// Creates a new folder in the current directory.
     func createFolder(name: String) async {
         guard let apiClient, !serverId.isEmpty else { return }
-        let folderPath = currentPath.hasSuffix("/")
-            ? "\(currentPath)\(name)"
-            : "\(currentPath)/\(name)"
+        let folderPath = currentPath.hasSuffix("/") ? "\(currentPath)\(name)" : "\(currentPath)/\(name)"
         do {
             try await apiClient.terminalMkdir(serverId: serverId, path: folderPath)
             await loadDirectory()
@@ -186,20 +174,17 @@ final class TerminalBrowserViewModel {
         }
     }
 
-    /// Deletes a file or directory.
     func deleteItem(_ item: TerminalFileItem) async {
         guard let apiClient, !serverId.isEmpty else { return }
         do {
             try await apiClient.terminalDeleteFile(serverId: serverId, path: item.path)
-            // Remove from local list immediately for snappy feel
             items.removeAll { $0.path == item.path }
         } catch {
             errorMessage = error.localizedDescription
-            await loadDirectory() // Refresh to get accurate state
+            await loadDirectory()
         }
     }
 
-    /// Downloads a file and returns the local URL for sharing/preview.
     func downloadFile(_ item: TerminalFileItem) async -> URL? {
         guard let apiClient, !serverId.isEmpty else { return nil }
         do {
@@ -216,15 +201,11 @@ final class TerminalBrowserViewModel {
         }
     }
 
-    /// Uploads a file to the current directory.
     func uploadFile(data: Data, fileName: String) async {
         guard let apiClient, !serverId.isEmpty else { return }
         do {
             try await apiClient.terminalUploadFile(
-                serverId: serverId,
-                fileData: data,
-                fileName: fileName,
-                destinationPath: currentPath
+                serverId: serverId, fileData: data, fileName: fileName, destinationPath: currentPath
             )
             await loadDirectory()
         } catch {
@@ -232,242 +213,284 @@ final class TerminalBrowserViewModel {
         }
     }
 
-    // MARK: - Persistent Shell Session
+    // MARK: - WebSocket Shell Session
 
-    /// Starts a persistent bash shell session. Called automatically when the terminal
-    /// section is first expanded.
-    ///
-    /// Launches `bash` via `/execute`, stores the process ID, then starts a
-    /// background task that continuously polls for output using the offset-based
-    /// long-poll endpoint.
+    /// Start a fresh shell session. Guards against double-start.
     func startShell() async {
         guard let apiClient, !serverId.isEmpty else { return }
         guard !isShellReady, !isShellStarting else { return }
 
         isShellStarting = true
-        shellOutput = ""
-        shellOutputOffset = 0
-
         do {
-            let result = try await apiClient.terminalExecute(
-                serverId: serverId,
-                command: "bash",
-                cwd: currentPath
-            )
-            shellProcessId = result.id
-            shellOutputOffset = result.nextOffset
-            if !result.output.isEmpty {
-                appendOutput(result.output)
-            }
-            isShellReady = true
-            isShellStarting = false
-            logger.info("Shell started — processId: \(result.id)")
-            startPollingShell()
+            // Step 1: Create terminal session on the server
+            let sessionId = try await apiClient.terminalCreateSession(serverId: serverId)
+            terminalSessionId = sessionId
+            logger.info("Terminal session created: \(sessionId)")
+
+            // Step 2: Build WebSocket URL
+            let wsURL = try buildWebSocketURL(sessionId: sessionId)
+            logger.info("Connecting WS to: \(wsURL)")
+
+            // Step 3: Connect WebSocket
+            connectWebSocket(url: wsURL, token: apiClient.network.authToken ?? "")
+
+            // Reset reconnect counter on successful connect
+            reconnectAttempt = 0
+
         } catch {
             isShellStarting = false
             isShellReady = false
-            appendOutput("\r\n[Failed to start shell: \(error.localizedDescription)]\r\n")
+            let errMsg = "\r\n\u{001B}[31m[Failed to start terminal: \(error.localizedDescription)]\u{001B}[0m\r\n"
+            feedToTerminal(errMsg)
             logger.error("Failed to start shell: \(error.localizedDescription)")
+            // Schedule a retry if we haven't exhausted attempts
+            scheduleAutoReconnect()
         }
     }
 
-    /// Sends a line of text as stdin to the running bash process.
-    ///
-    /// The input is appended with `\n` so the shell treats it as an Enter press.
-    /// If the user types "clear", the local output buffer is cleared immediately
-    /// for a snappy feel (the server may or may not honour ANSI clear).
-    func sendInput(_ text: String) {
-        guard let apiClient, !serverId.isEmpty else { return }
-        guard let processId = shellProcessId else {
-            // Shell not yet started — start it first then send input
-            Task {
-                await startShell()
-                sendInput(text)
-            }
-            return
-        }
-
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Append to history (skip empty commands and duplicates of the last entry)
-        if !trimmed.isEmpty, commandHistory.last != trimmed {
-            commandHistory.append(trimmed)
-        }
-        historyIndex = -1
-
-        commandInput = ""
-
-        // Handle "clear" locally for instant feedback
-        if trimmed == "clear" {
-            shellOutput = ""
-            outputScrollToken += 1
-        }
-
-        Task {
-            do {
-                try await apiClient.terminalSendInput(
-                    serverId: serverId,
-                    processId: processId,
-                    input: text + "\n"
-                )
-            } catch {
-                appendOutput("\r\n[Input error: \(error.localizedDescription)]")
-                logger.error("sendInput error: \(error.localizedDescription)")
-            }
-        }
+    /// Call this whenever the terminal panel becomes visible (panel opens,
+    /// terminal section expands, fullscreen toggled). If the shell is not
+    /// running it will start/reconnect immediately without needing a button tap.
+    func reconnectIfNeeded() {
+        guard !isShellReady, !isShellStarting else { return }
+        guard apiClient != nil, !serverId.isEmpty else { return }
+        // Cancel any pending backoff reconnect — we want to reconnect NOW
+        cancelAutoReconnect()
+        reconnectAttempt = 0
+        Task { await startShell() }
     }
 
-    /// Sends a raw byte sequence (e.g. Ctrl+C = `\x03`, Tab = `\t`) to the shell.
-    func sendRawInput(_ bytes: String) {
-        guard let apiClient, !serverId.isEmpty, let processId = shellProcessId else { return }
-        Task {
-            do {
-                try await apiClient.terminalSendInput(
-                    serverId: serverId,
-                    processId: processId,
-                    input: bytes
-                )
-            } catch {
-                logger.error("sendRawInput error: \(error.localizedDescription)")
-            }
+    private func buildWebSocketURL(sessionId: String) throws -> URL {
+        guard let apiClient else { throw URLError(.badURL) }
+        var serverURL = apiClient.baseURL
+        // Trim trailing slash
+        if serverURL.hasSuffix("/") { serverURL = String(serverURL.dropLast()) }
+
+        // Convert http(s) → ws(s)
+        var wsURLString = serverURL
+        if wsURLString.hasPrefix("https://") {
+            wsURLString = "wss://" + wsURLString.dropFirst("https://".count)
+        } else if wsURLString.hasPrefix("http://") {
+            wsURLString = "ws://" + wsURLString.dropFirst("http://".count)
         }
-    }
 
-    /// Navigates command history. `up: true` = older command, `up: false` = newer.
-    func navigateHistory(up: Bool) {
-        guard !commandHistory.isEmpty else { return }
-        if up {
-            if historyIndex == -1 {
-                historyIndex = commandHistory.count - 1
-            } else if historyIndex > 0 {
-                historyIndex -= 1
-            }
-        } else {
-            if historyIndex == -1 { return }
-            if historyIndex < commandHistory.count - 1 {
-                historyIndex += 1
-            } else {
-                historyIndex = -1
-                commandInput = ""
-                return
-            }
+        let path = "/api/v1/terminals/\(serverId)/api/terminals/\(sessionId)"
+        guard let url = URL(string: wsURLString + path) else {
+            throw URLError(.badURL)
         }
-        commandInput = commandHistory[historyIndex]
+        return url
     }
 
-    /// Clears the on-screen terminal output buffer.
-    func clearOutput() {
-        shellOutput = ""
-        outputScrollToken += 1
-    }
+    private func connectWebSocket(url: URL, token: String) {
+        // Tear down any existing connection first
+        tearDownWebSocket()
 
-    // MARK: - Private Shell Helpers
+        // Create a new URLSession with no timeouts for the WS
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = .infinity
+        config.timeoutIntervalForResource = .infinity
+        config.waitsForConnectivity = true
+        config.httpCookieStorage = HTTPCookieStorage.shared
 
-    private func startPollingShell() {
-        shellPollingTask?.cancel()
-        shellPollingTask = Task {
-            await pollShellOutput()
-        }
-    }
+        let session = URLSession(configuration: config)
+        wsSession = session
 
-    private func stopShell() {
-        shellPollingTask?.cancel()
-        shellPollingTask = nil
-        shellProcessId = nil
-        isShellReady = false
+        var request = URLRequest(url: url)
+        request.timeoutInterval = .infinity
+        let task = session.webSocketTask(with: request)
+        wsTask = task
+        task.resume()
+
+        // Auth handshake — use a small delay so the TCP handshake completes
+        // before we send frames. URLSessionWebSocketTask buffers sends, so
+        // this is safe even if the connection isn't open yet.
+        sendTextFrame(["type": "auth", "token": token])
+
+        // Resize to current terminal dimensions
+        sendTextFrame(["type": "resize", "cols": terminalCols, "rows": terminalRows])
+
+        // Start receive loop and ping timer
+        wsReceiveTask = Task { await receiveLoop() }
+        wsPingTask = Task { await pingLoop() }
+
+        isShellReady = true
         isShellStarting = false
+        logger.info("WebSocket connected and authenticated")
     }
 
-    /// Continuously long-polls for new output from the running bash process.
-    ///
-    /// Uses offset-based polling: each call to `terminalGetCommandStatus` returns
-    /// only the output produced since the last read. When the process exits (unlikely
-    /// for a bash session), the loop terminates.
-    private func pollShellOutput() async {
-        guard let apiClient else { return }
+    /// Tears down the WS tasks without touching isShellReady/isShellStarting.
+    private func tearDownWebSocket() {
+        wsReceiveTask?.cancel()
+        wsReceiveTask = nil
+        wsPingTask?.cancel()
+        wsPingTask = nil
+        wsTask?.cancel(with: .normalClosure, reason: nil)
+        wsTask = nil
+        wsSession?.invalidateAndCancel()
+        wsSession = nil
+    }
 
+    private func sendTextFrame(_ dict: [String: Any]) {
+        guard let wsTask else { return }
+        // URLSessionWebSocketTask buffers messages until the connection is open,
+        // so we don't gate on `.running` here — the task may be in `.suspended`
+        // briefly right after creation.
+        guard wsTask.state != .canceling, wsTask.state != .completed else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let str = String(data: data, encoding: .utf8) else { return }
+        wsTask.send(.string(str)) { [weak self] error in
+            if let error {
+                self?.logger.error("WS send text error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Called by `TerminalViewDelegate.send()` — user typed something in SwiftTerm.
+    /// Sends the raw bytes as a binary WebSocket frame — exactly what the web UI does.
+    func sendRawToServer(_ data: ArraySlice<UInt8>) {
+        guard let wsTask, wsTask.state == .running else { return }
+        let bytes = Data(data)
+        wsTask.send(.data(bytes)) { [weak self] error in
+            if let error {
+                self?.logger.error("WS send binary error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Sends a raw control sequence to the shell (Tab, arrows, Ctrl+C, etc.)
+    func sendControlSequence(_ bytes: String) {
+        guard let data = bytes.data(using: .utf8) else { return }
+        guard let wsTask, wsTask.state == .running else { return }
+        wsTask.send(.data(data)) { [weak self] error in
+            if let error {
+                self?.logger.error("WS send ctrl error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Notifies the server of a terminal resize event.
+    func sendResize(cols: Int, rows: Int) {
+        terminalCols = cols
+        terminalRows = rows
+        guard isShellReady else { return }
+        sendTextFrame(["type": "resize", "cols": cols, "rows": rows])
+    }
+
+    /// Clears the SwiftTerm screen and scrollback.
+    func clearTerminal() {
+        terminalView?.getTerminal().resetToInitialState()
+        sendControlSequence("\u{0C}") // Ctrl+L
+    }
+
+    // MARK: - WebSocket Receive Loop
+
+    private func receiveLoop() async {
         while !Task.isCancelled {
-            guard let processId = shellProcessId else { break }
+            guard let wsTask else { break }
 
             do {
-                let status = try await apiClient.terminalGetCommandStatus(
-                    serverId: serverId,
-                    processId: processId,
-                    offset: shellOutputOffset
-                )
+                let message = try await wsTask.receive()
+                switch message {
+                case .data(let data):
+                    // Raw PTY output — feed directly to SwiftTerm
+                    let slice = ArraySlice(data)
+                    feedBytesToTerminal(slice)
 
-                if !status.output.isEmpty {
-                    appendOutput(status.output)
-                }
-                shellOutputOffset = status.nextOffset
+                case .string(let str):
+                    // Control messages from server (rare)
+                    logger.debug("WS text frame: \(str)")
 
-                if !status.isRunning {
-                    // Bash exited — offer to restart
-                    appendOutput("\r\n[Shell session ended]\r\n")
-                    isShellReady = false
-                    shellProcessId = nil
-                    logger.info("Shell process exited.")
+                @unknown default:
                     break
                 }
             } catch {
                 if Task.isCancelled { break }
-                logger.error("Poll error: \(error.localizedDescription)")
-                // Brief back-off before retrying after a network error
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                logger.error("WS receive error: \(error.localizedDescription)")
+                await handleDisconnect()
+                break
             }
         }
     }
 
-    /// Appends text to the output buffer and bumps the scroll token.
-    ///
-    /// Strips ANSI escape sequences and known harmless bash non-PTY warnings
-    /// before appending — the plain SwiftUI Text view cannot render them.
-    private func appendOutput(_ text: String) {
-        let stripped = stripAnsiCodes(text)
-        let filtered = filterBashWarnings(stripped)
-        guard !filtered.isEmpty else { return }
-        shellOutput += filtered
-        outputScrollToken += 1
-    }
-
-    /// Removes ANSI/VT100 escape sequences from `text`.
-    ///
-    /// Covers:
-    /// - CSI sequences: `ESC [ … <final-byte>` (colours, cursor, erase, …)
-    /// - OSC sequences: `ESC ] … ST` (title setting, hyperlinks, …)
-    /// - Single-char C1 controls: `ESC <char>` (e.g. ESC M, ESC =)
-    private func stripAnsiCodes(_ text: String) -> String {
-        // CSI: ESC [ followed by parameter/intermediate bytes, ending in a letter
-        let csi = "\u{1B}\\[[0-9;?]*[A-Za-z]"
-        // OSC: ESC ] … terminated by BEL (0x07) or ST (ESC \)
-        let osc = "\u{1B}].*?(\u{07}|\u{1B}\\\\)"
-        // Single ESC + one non-[ character (e.g. ESC M, ESC =, ESC >)
-        let singleEsc = "\u{1B}[^\\[]"
-        // Bare ESC at end of string or before next ESC
-        let bareEsc = "\u{1B}"
-
-        var result = text
-        for pattern in [csi, osc, singleEsc, bareEsc] {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-                let range = NSRange(result.startIndex..., in: result)
-                result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
+    private func pingLoop() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 25_000_000_000) // 25 seconds
+            if Task.isCancelled { break }
+            guard isShellReady else { break }
+            guard let wsTask, wsTask.state == .running else {
+                // Task is no longer running — handleDisconnect will be called
+                // by the receive loop error, so just exit ping loop
+                break
             }
+            sendTextFrame(["type": "ping"])
         }
-        return result
     }
 
-    /// Strips lines that are known harmless bash non-PTY startup warnings.
-    private func filterBashWarnings(_ text: String) -> String {
-        let suppressedPrefixes = [
-            "bash: cannot set terminal process group",
-            "bash: no job control in this shell"
-        ]
-        // Split on both \r\n and \n, filter, then rejoin with \r\n
-        let lines = text.components(separatedBy: "\n")
-        let kept = lines.filter { line in
-            let trimmed = line.trimmingCharacters(in: .init(charactersIn: "\r "))
-            return !suppressedPrefixes.contains { trimmed.hasPrefix($0) }
+    @MainActor
+    private func handleDisconnect() async {
+        guard isShellReady else { return }
+        isShellReady = false
+        tearDownWebSocket()
+        terminalSessionId = nil
+        logger.info("Terminal WebSocket disconnected")
+
+        // Auto-reconnect — only if the terminal panel is still open/expanded
+        if isTerminalExpanded {
+            scheduleAutoReconnect()
         }
-        return kept.joined(separator: "\n")
+    }
+
+    // MARK: - Auto-reconnect
+
+    private func scheduleAutoReconnect() {
+        guard reconnectAttempt < Self.maxReconnectAttempts else {
+            // Exhausted retries — show a message so the user knows
+            feedToTerminal("\r\n\u{001B}[31m[Connection lost. Tap ↺ to reconnect.]\u{001B}[0m\r\n")
+            reconnectAttempt = 0
+            return
+        }
+
+        let delay = Self.reconnectDelays[min(reconnectAttempt, Self.reconnectDelays.count - 1)]
+        let attempt = reconnectAttempt
+        reconnectAttempt += 1
+
+        logger.info("Auto-reconnect in \(delay / 1_000_000_000)s (attempt \(attempt + 1)/\(Self.maxReconnectAttempts))")
+
+        cancelAutoReconnect()
+        autoReconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            await self?.startShell()
+        }
+    }
+
+    private func cancelAutoReconnect() {
+        autoReconnectTask?.cancel()
+        autoReconnectTask = nil
+    }
+
+    // MARK: - Cleanup
+
+    func disconnectWebSocket() {
+        cancelAutoReconnect()
+        tearDownWebSocket()
+        terminalSessionId = nil
+        isShellReady = false
+        isShellStarting = false
+        reconnectAttempt = 0
+    }
+
+    // MARK: - Terminal Output Helpers
+
+    /// Feeds raw bytes directly into SwiftTerm (no UTF-8 conversion needed).
+    private func feedBytesToTerminal(_ bytes: ArraySlice<UInt8>) {
+        terminalView?.feed(byteArray: bytes)
+    }
+
+    /// Feeds a string as raw bytes into SwiftTerm (for status messages).
+    func feedToTerminal(_ text: String) {
+        guard let filteredBytes = text.data(using: .utf8) else { return }
+        let slice = ArraySlice(filteredBytes)
+        terminalView?.feed(byteArray: slice)
     }
 }

@@ -7,10 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3800ST012F00000000ST001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 3800ST002F00000000ST001 /* SwiftTerm */; };
 		3852C70F2F71110800283682 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3852C70E2F71110800283682 /* WidgetKit.framework */; };
 		3852C7112F71110800283682 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3852C7102F71110800283682 /* SwiftUI.framework */; };
 		3852C7222F71110900283682 /* OpenUIWidgetsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3852C70C2F71110800283682 /* OpenUIWidgetsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		38SHARE012F00000000000001 /* OpenUIShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 38SHARE022F00000000000002 /* OpenUIShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		38754A972F845BE60012CD28 /* ReactionContextMenu in Frameworks */ = {isa = PBXBuildFile; productRef = 38754A962F845BE60012CD28 /* ReactionContextMenu */; };
 		387CA40E2F882523000B5152 /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 387CA40D2F882523000B5152 /* MarkdownParser */; };
 		387CA4102F882523000B5152 /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 387CA40F2F882523000B5152 /* MarkdownView */; };
@@ -32,6 +32,7 @@
 		38FEA3182FA2A18600A98F25 /* MLXAudioCore in Frameworks */ = {isa = PBXBuildFile; productRef = 38FEA3172FA2A18600A98F25 /* MLXAudioCore */; };
 		38FEA31A2FA2A18600A98F25 /* MLXAudioSTT in Frameworks */ = {isa = PBXBuildFile; productRef = 38FEA3192FA2A18600A98F25 /* MLXAudioSTT */; };
 		38FEA31C2FA2A18600A98F25 /* MLXAudioTTS in Frameworks */ = {isa = PBXBuildFile; productRef = 38FEA31B2FA2A18600A98F25 /* MLXAudioTTS */; };
+		38SHARE012F00000000000001 /* OpenUIShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 38SHARE022F00000000000002 /* OpenUIShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,10 +69,10 @@
 
 /* Begin PBXFileReference section */
 		3852C70C2F71110800283682 /* OpenUIWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenUIWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		38SHARE022F00000000000002 /* OpenUIShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenUIShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		3852C70E2F71110800283682 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		3852C7102F71110800283682 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		38EB667D2F39CE5A00AED774 /* Open UI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Open UI.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		38SHARE022F00000000000002 /* OpenUIShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenUIShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -82,20 +83,19 @@
 			);
 			target = 3852C70B2F71110800283682 /* OpenUIWidgetsExtension */;
 		};
-		38SHARE052F00000000000005 /* Exceptions for "OpenUIShareExtension" folder in "OpenUIShareExtension" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-				ShareExtension.entitlements,
-			);
-			target = 38SHARE042F00000000000004 /* OpenUIShareExtension */;
-		};
 		38EB66802F39CE5B00AED774 /* Exceptions for "Open UI" folder in "Open UI" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
 			target = 38EB667C2F39CE5A00AED774 /* Open UI */;
+		};
+		38SHARE052F00000000000005 /* Exceptions for "OpenUIShareExtension" folder in "OpenUIShareExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 38SHARE042F00000000000004 /* OpenUIShareExtension */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -108,20 +108,20 @@
 			path = OpenUIWidgets;
 			sourceTree = "<group>";
 		};
-		38SHARE062F00000000000006 /* OpenUIShareExtension */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				38SHARE052F00000000000005 /* Exceptions for "OpenUIShareExtension" folder in "OpenUIShareExtension" target */,
-			);
-			path = OpenUIShareExtension;
-			sourceTree = "<group>";
-		};
 		38EB667F2F39CE5A00AED774 /* Open UI */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				38EB66802F39CE5B00AED774 /* Exceptions for "Open UI" folder in "Open UI" target */,
 			);
 			path = "Open UI";
+			sourceTree = "<group>";
+		};
+		38SHARE062F00000000000006 /* OpenUIShareExtension */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				38SHARE052F00000000000005 /* Exceptions for "OpenUIShareExtension" folder in "OpenUIShareExtension" target */,
+			);
+			path = OpenUIShareExtension;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -133,13 +133,6 @@
 			files = (
 				3852C7112F71110800283682 /* SwiftUI.framework in Frameworks */,
 				3852C70F2F71110800283682 /* WidgetKit.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		38SHARE072F00000000000007 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -163,11 +156,19 @@
 				388C02FC2FB533F60098FB4F /* MarkdownParser in Frameworks */,
 				3890E2912F9845C10011D505 /* MarkdownView in Frameworks */,
 				38AA00012FA9B00000MRMAID /* BeautifulMermaid in Frameworks */,
+				3800ST012F00000000ST001 /* SwiftTerm in Frameworks */,
 				388C02F92FB5131C0098FB4F /* MarkdownView in Frameworks */,
 				387CA40E2F882523000B5152 /* MarkdownParser in Frameworks */,
 				388C02EF2FB44BD60098FB4F /* MarkdownView in Frameworks */,
 				388C02ED2FB44BD60098FB4F /* MarkdownParser in Frameworks */,
 				38FEA31A2FA2A18600A98F25 /* MLXAudioSTT in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		38SHARE072F00000000000007 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -229,28 +230,6 @@
 			productReference = 3852C70C2F71110800283682 /* OpenUIWidgetsExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
-		38SHARE042F00000000000004 /* OpenUIShareExtension */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 38SHARE0A2F0000000000000A /* Build configuration list for PBXNativeTarget "OpenUIShareExtension" */;
-			buildPhases = (
-				38SHARE082F00000000000008 /* Sources */,
-				38SHARE072F00000000000007 /* Frameworks */,
-				38SHARE092F00000000000009 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				38SHARE062F00000000000006 /* OpenUIShareExtension */,
-			);
-			name = OpenUIShareExtension;
-			packageProductDependencies = (
-			);
-			productName = OpenUIShareExtension;
-			productReference = 38SHARE022F00000000000002 /* OpenUIShareExtension.appex */;
-			productType = "com.apple.product-type.app-extension";
-		};
 		38EB667C2F39CE5A00AED774 /* Open UI */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 38EB668D2F39CE5C00AED774 /* Build configuration list for PBXNativeTarget "Open UI" */;
@@ -272,6 +251,7 @@
 			name = "Open UI";
 			packageProductDependencies = (
 				38AA00002FA9B00000MRMAID /* BeautifulMermaid */,
+				3800ST002F00000000ST001 /* SwiftTerm */,
 				38754A962F845BE60012CD28 /* ReactionContextMenu */,
 				387CA40D2F882523000B5152 /* MarkdownParser */,
 				387CA40F2F882523000B5152 /* MarkdownView */,
@@ -297,6 +277,28 @@
 			productReference = 38EB667D2F39CE5A00AED774 /* Open UI.app */;
 			productType = "com.apple.product-type.application";
 		};
+		38SHARE042F00000000000004 /* OpenUIShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 38SHARE0A2F0000000000000A /* Build configuration list for PBXNativeTarget "OpenUIShareExtension" */;
+			buildPhases = (
+				38SHARE082F00000000000008 /* Sources */,
+				38SHARE072F00000000000007 /* Frameworks */,
+				38SHARE092F00000000000009 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				38SHARE062F00000000000006 /* OpenUIShareExtension */,
+			);
+			name = OpenUIShareExtension;
+			packageProductDependencies = (
+			);
+			productName = OpenUIShareExtension;
+			productReference = 38SHARE022F00000000000002 /* OpenUIShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -306,17 +308,17 @@
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2620;
-			TargetAttributes = {
-				3852C70B2F71110800283682 = {
-					CreatedOnToolsVersion = 26.3;
+				TargetAttributes = {
+					3852C70B2F71110800283682 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					38EB667C2F39CE5A00AED774 = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					38SHARE042F00000000000004 = {
+						CreatedOnToolsVersion = 26.3;
+					};
 				};
-				38EB667C2F39CE5A00AED774 = {
-					CreatedOnToolsVersion = 26.2;
-				};
-				38SHARE042F00000000000004 = {
-					CreatedOnToolsVersion = 26.3;
-				};
-			};
 			};
 			buildConfigurationList = 38EB66782F39CE5A00AED774 /* Build configuration list for PBXProject "Open UI" */;
 			developmentRegion = en;
@@ -334,6 +336,7 @@
 			packageReferences = (
 				38AA00022FA9B00000MRMAID /* XCRemoteSwiftPackageReference "beautiful-mermaid-swift" */,
 				38754A952F845BE60012CD28 /* XCRemoteSwiftPackageReference "ReactionContextMenu" */,
+				3800STREF2F00000000ST00F /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 				38FEA3162FA2A18600A98F25 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */,
 				388C02FA2FB533F60098FB4F /* XCRemoteSwiftPackageReference "MarkdownView" */,
 			);
@@ -357,14 +360,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		38SHARE092F00000000000009 /* Resources */ = {
+		38EB667B2F39CE5A00AED774 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		38EB667B2F39CE5A00AED774 /* Resources */ = {
+		38SHARE092F00000000000009 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -381,14 +384,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		38SHARE082F00000000000008 /* Sources */ = {
+		38EB66792F39CE5A00AED774 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		38EB66792F39CE5A00AED774 /* Sources */ = {
+		38SHARE082F00000000000008 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -411,60 +414,6 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		38SHARE0C2F0000000000000C /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = OpenUIShareExtension/ShareExtension.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 6ARX8PF3MT;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = OpenUIShareExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Open Relay";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.1;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 4.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.ShareExtension;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		38SHARE0D2F0000000000000D /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = OpenUIShareExtension/ShareExtension.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 6ARX8PF3MT;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = OpenUIShareExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Open Relay";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.1;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 4.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.ShareExtension;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Release;
-		};
 		3852C7252F71110900283682 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -484,7 +433,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 4.6;
+				MARKETING_VERSION = 4.6.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -516,7 +465,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 4.6;
+				MARKETING_VERSION = 4.6.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -685,7 +634,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 4.6;
+				MARKETING_VERSION = 4.6.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -733,7 +682,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 4.6;
+				MARKETING_VERSION = 4.6.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -750,6 +699,60 @@
 			};
 			name = Release;
 		};
+		38SHARE0C2F0000000000000C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = OpenUIShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6ARX8PF3MT;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = OpenUIShareExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Open Relay";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 4.6.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		38SHARE0D2F0000000000000D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = OpenUIShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6ARX8PF3MT;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = OpenUIShareExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Open Relay";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 4.6.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -758,15 +761,6 @@
 			buildConfigurations = (
 				3852C7252F71110900283682 /* Debug */,
 				3852C7262F71110900283682 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		38SHARE0A2F0000000000000A /* Build configuration list for PBXNativeTarget "OpenUIShareExtension" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				38SHARE0C2F0000000000000C /* Debug */,
-				38SHARE0D2F0000000000000D /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -789,9 +783,26 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		38SHARE0A2F0000000000000A /* Build configuration list for PBXNativeTarget "OpenUIShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				38SHARE0C2F0000000000000C /* Debug */,
+				38SHARE0D2F0000000000000D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		3800STREF2F00000000ST00F /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
 		38754A952F845BE60012CD28 /* XCRemoteSwiftPackageReference "ReactionContextMenu" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/Ichigo3766/ReactionContextMenu";
@@ -827,6 +838,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		3800ST002F00000000ST001 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3800STREF2F00000000ST00F /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
+		};
 		38754A962F845BE60012CD28 /* ReactionContextMenu */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 38754A952F845BE60012CD28 /* XCRemoteSwiftPackageReference "ReactionContextMenu" */;

@@ -3546,10 +3546,8 @@ private struct IsolatedAssistantMessage: View {
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
 
         if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            HStack {
-                TypingIndicator()
-                Spacer()
-            }
+            // TypingIndicator has a fixed 44×22pt frame — no HStack/Spacer needed.
+            TypingIndicator()
         } else if isActivelyStreaming && streamingStore.frozenBoundary > 0 {
 
 

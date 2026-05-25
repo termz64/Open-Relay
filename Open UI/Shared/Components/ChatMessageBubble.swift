@@ -202,8 +202,10 @@ struct TypingIndicator: View {
         }
         // Fixed intrinsic size so the indicator occupies the same space as a
         // single line of text — prevents layout recalculation on appear/disappear.
-        .frame(height: 22, alignment: .center)
-        .padding(.horizontal, Spacing.sm)
+        // fixedSize(vertical:) ensures the HStack never stretches taller than 22pt
+        // even when placed inside a maxWidth:.infinity container.
+        .frame(width: 44, height: 22, alignment: .leading)
+        .fixedSize()
         .onAppear { animate = true }
         // Bug 8: explicitly stop the three repeatForever CAAnimations when TypingIndicator
         // leaves the hierarchy (first token arrives). Without this, the CAAnimation objects

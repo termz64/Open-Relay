@@ -2714,11 +2714,9 @@ struct AssistantMessageContent: View {
 
         VStack(alignment: .leading, spacing: Spacing.xs) {
             if ordered.segments.isEmpty && isStreaming {
-                // Show typing indicator when streaming with no content yet
-                HStack {
-                    TypingIndicator()
-                    Spacer()
-                }
+                // Show typing indicator when streaming with no content yet.
+                // TypingIndicator has a fixed 44×22pt frame — no HStack/Spacer needed.
+                TypingIndicator()
             } else {
                 // Render each segment in the order it appears in the content.
                 // Adjacent tool calls are grouped together with dividers
@@ -2812,10 +2810,8 @@ struct AssistantMessageContent: View {
                         return true
                     }()
                     if lastIsNonText {
-                        HStack {
-                            TypingIndicator()
-                            Spacer()
-                        }
+                        // TypingIndicator has a fixed 44×22pt frame — no HStack/Spacer needed.
+                        TypingIndicator()
                     }
                 }
             }

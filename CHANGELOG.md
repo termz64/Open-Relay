@@ -1,5 +1,13 @@
 # Changelog
 
+## v4.6.1 — May 25, 2026
+
+### What's New
+- Complete redesign of open terminal shell architecture — now powered by SwiftTerm, native terminal experience using websockets instead of http polling. It should feel snappier and realtime.
+
+### Bug Fixes
+- Fixed typing indicator appearing as a large full-width element while the AI is generating a response.
+
 ## v4.6 — May 20, 2026
 
 ### What's New
