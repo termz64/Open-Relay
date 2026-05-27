@@ -118,6 +118,8 @@ struct AdminSettingsTab: View {
             AdminGeneralSettingsView()
         case .connections:
             AdminConnectionsView()
+        case .models:
+            AdminModelsSettingsView()
         case .integrations:
             AdminIntegrationsView()
         case .documents:

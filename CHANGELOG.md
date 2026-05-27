@@ -1,5 +1,14 @@
 # Changelog
 
+## v4.7 — May 26, 2026
+
+### What's New
+- Added models tab under Admin Console settings - You can now manage your models from the app directly.
+
+### Bug Fixes
+- Fixed app freezing when switching to a chat containing images.
+- Fixed intermittent crash when opening model selector, model editor, tool valves, or chat parameters sheets.
+
 ## v4.6.1 — May 25, 2026
 
 ### What's New

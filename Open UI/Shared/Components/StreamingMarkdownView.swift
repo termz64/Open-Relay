@@ -677,10 +677,12 @@ struct StreamingMarkdownView: View {
     /// Returns true for image URLs that can be rendered inline:
     /// - `http` / `https` remote URLs
     /// - `data:image/` Base64 data URIs
+    /// - `imgcache://` compact tokens (base64 payloads extracted at parse time)
     private static func isRenderableImageURL(_ url: URL) -> Bool {
         switch url.scheme {
         case "http", "https": return true
         case "data":          return url.absoluteString.hasPrefix("data:image/")
+        case "imgcache":      return true
         default:              return false
         }
     }
@@ -1046,7 +1048,13 @@ private struct MarkdownInlineImageView: View {
     /// Returns `nil` for any other scheme or malformed URI.
     /// Safe to call from a background thread — no UIKit main-thread APIs used.
     private nonisolated static func decodeDataURI(_ url: URL) -> UIImage? {
-        let raw = url.absoluteString
+        decodeDataURIString(url.absoluteString)
+    }
+
+    /// Variant that accepts the raw data URI string directly, avoiding the cost
+    /// of constructing a `URL` from a potentially 500 KB base64 string.
+    /// Safe to call from a background thread — no UIKit main-thread APIs used.
+    private nonisolated static func decodeDataURIString(_ raw: String) -> UIImage? {
         guard raw.hasPrefix("data:image/") else { return nil }
         // Find the comma that separates the header from the payload.
         guard let commaIdx = raw.firstIndex(of: ",") else { return nil }
@@ -1060,7 +1068,7 @@ private struct MarkdownInlineImageView: View {
     }
 
     var body: some View {
-        if imageURL.scheme == "data" {
+        if imageURL.scheme == "data" || imageURL.scheme == "imgcache" {
             // ── Inline Base64 data URI ────────────────────────────────────────
             // Decoding happens off the main thread to prevent the freeze that
             // occurs when opening a chat with multiple base64 images — each
@@ -1096,10 +1104,24 @@ private struct MarkdownInlineImageView: View {
                         }
                         // Decode on a background thread — base64 + image decompression
                         // can be 50–200ms; must not run on the main thread.
-                        let url = imageURL
-                        let decoded = await Task.detached(priority: .userInitiated) {
-                            Self.decodeDataURI(url)
-                        }.value
+                        let decoded: UIImage?
+                        if imageURL.scheme == "imgcache" {
+                            // Resolve the compact token back to the actual data URI string.
+                            // We pass the raw string directly to avoid the cost of constructing
+                            // a URL from a potentially 500 KB base64 URI.
+                            let tokenString = imageURL.absoluteString
+                            decoded = await Task.detached(priority: .userInitiated) {
+                                guard let dataURI = InlineImageStore.shared.resolve(urlString: tokenString) else {
+                                    return nil
+                                }
+                                return Self.decodeDataURIString(dataURI)
+                            }.value
+                        } else {
+                            let url = imageURL
+                            decoded = await Task.detached(priority: .userInitiated) {
+                                Self.decodeDataURI(url)
+                            }.value
+                        }
                         if let image = decoded {
                             Self.base64ImageCache.setObject(image, forKey: key)
                             // Suppress implicit animation so the layout change from

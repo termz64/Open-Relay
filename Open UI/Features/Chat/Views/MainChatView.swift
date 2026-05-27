@@ -2759,6 +2759,7 @@ let conversationId: String?
                             vm.selectModel(model.id)
                         }
                     )
+                    .environment(dependencies)
                     .themed()
                     .presentationBackgroundInteraction(.disabled)
                     .onDisappear {
@@ -2774,6 +2775,7 @@ let conversationId: String?
                     editingModelDetail = nil
                 }
             }
+            .environment(dependencies)
             .themed()
         }
     }

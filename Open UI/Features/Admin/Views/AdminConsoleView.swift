@@ -37,6 +37,7 @@ enum AdminConsoleTab: String, CaseIterable {
 enum SettingsSubSection: String, CaseIterable {
     case general      = "General"
     case connections  = "Connections"
+    case models       = "Models"
     case integrations = "Integrations"
     case documents    = "Documents"
     case webSearch    = "Web Search"
@@ -49,6 +50,7 @@ enum SettingsSubSection: String, CaseIterable {
         switch self {
         case .general:       return "gear"
         case .connections:   return "link"
+        case .models:        return "cpu"
         case .integrations:  return "wrench.and.screwdriver"
         case .documents:     return "doc.text"
         case .webSearch:     return "globe"

@@ -394,6 +394,10 @@ struct MessageHistory: Sendable {
            let contentArr = firstOutput["content"] as? [[String: Any]] {
             content = contentArr.compactMap { $0["text"] as? String }.joined()
         }
+        // Extract any inline base64 image data URIs off the main thread.
+        // Replaces ![alt](data:image/...;base64,...) with ![alt](imgcache://TOKEN)
+        // so SwiftUI never receives 500 KB strings in content during layout passes.
+        content = InlineImageStore.extractAndReplace(content: content)
 
         var timestamp = Date()
         if let ts = msg["timestamp"] as? Double {

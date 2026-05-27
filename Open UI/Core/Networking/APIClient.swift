@@ -2012,6 +2012,49 @@ final class APIClient: @unchecked Sendable {
         return array.compactMap { SkillDetail(json: $0) }
     }
 
+    // MARK: - Models Config (Admin)
+
+    /// GET /api/v1/configs/models — global model defaults config
+    func getModelsConfig() async throws -> [String: Any] {
+        let (data, _) = try await network.requestRaw(path: "/api/v1/configs/models")
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.responseDecoding(underlying: NSError(domain: "parse", code: -1), data: data)
+        }
+        return json
+    }
+
+    /// POST /api/v1/configs/models — update global model defaults config
+    func updateModelsConfig(_ payload: [String: Any]) async throws {
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        _ = try await network.requestRaw(path: "/api/v1/configs/models", method: .post, body: body)
+    }
+
+    /// GET /api/v1/configs/suggestions — prompt suggestions.
+    /// Falls back to /api/config → default_prompt_suggestions if the dedicated endpoint returns empty.
+    func getSuggestionsConfig() async throws -> [[String: Any]] {
+        let (data, _) = try await network.requestRaw(path: "/api/v1/configs/suggestions")
+        if let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let arr = dict["suggestions"] as? [[String: Any]], !arr.isEmpty {
+            return arr
+        }
+        if let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]], !arr.isEmpty {
+            return arr
+        }
+        // Fallback: read default_prompt_suggestions from /api/config
+        if let (cfgData, _) = try? await network.requestRaw(path: "/api/config"),
+           let cfgDict = try? JSONSerialization.jsonObject(with: cfgData) as? [String: Any],
+           let arr = cfgDict["default_prompt_suggestions"] as? [[String: Any]], !arr.isEmpty {
+            return arr
+        }
+        return []
+    }
+
+    /// POST /api/v1/configs/suggestions — update prompt suggestions
+    func updateSuggestionsConfig(suggestions: [[String: Any]]) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["suggestions": suggestions])
+        _ = try await network.requestRaw(path: "/api/v1/configs/suggestions", method: .post, body: body)
+    }
+
     // MARK: - Workspace Models
 
     /// GET /api/v1/models/list — workspace models (user-created only, not base models)
@@ -2025,6 +2068,56 @@ final class APIClient: @unchecked Sendable {
             array = arr
         } else { return [] }
         return array.compactMap { ModelItem(json: $0) }
+    }
+
+    /// GET /api/v1/models — ALL models for admin (includes base/provider models + workspace models)
+    func listAllModels() async throws -> [ModelItem] {
+        let (data, _) = try await network.requestRaw(path: "/api/v1/models")
+        let json = try JSONSerialization.jsonObject(with: data)
+        let array: [[String: Any]]
+        if let dict = json as? [String: Any], let items = dict["data"] as? [[String: Any]] {
+            // OpenAI-compatible response: {"data": [...]}
+            array = items
+        } else if let dict = json as? [String: Any], let items = dict["items"] as? [[String: Any]] {
+            array = items
+        } else if let arr = json as? [[String: Any]] {
+            array = arr
+        } else { return [] }
+        return array.compactMap { ModelItem(json: $0) }
+    }
+
+    /// GET /api/v1/models/base — base/provider models only (no workspace custom models).
+    /// Returns a flat array directly (not OpenAI-compatible wrapper).
+    /// Used by the Admin Models Settings screen.
+    func listBaseModels() async throws -> [ModelItem] {
+        let (data, _) = try await network.requestRaw(path: "/api/v1/models/base")
+        let json = try JSONSerialization.jsonObject(with: data)
+        let array: [[String: Any]]
+        if let arr = json as? [[String: Any]] {
+            array = arr
+        } else if let dict = json as? [String: Any], let items = dict["data"] as? [[String: Any]] {
+            array = items
+        } else { return [] }
+        return array.compactMap { ModelItem(json: $0) }
+    }
+
+    /// GET /api/models/base — raw live models from enabled connections only (Ollama, OpenAI, pipe functions).
+    /// Returns {"data":[...]} format. Models have no "info{}" wrapper; is_active is absent (defaults to true).
+    /// Used by the Admin Models Settings screen as the source of truth for which models actually exist.
+    func listRawBaseModels() async throws -> [ModelItem] {
+        let (data, _) = try await network.requestRaw(path: "/api/models/base")
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["data"] as? [[String: Any]] else { return [] }
+        return items.compactMap { ModelItem(json: $0) }
+    }
+
+    /// GET /api/models — ALL models (base + workspace) in OpenAI-compatible {"data":[...]} format.
+    /// Each item wraps details under "info{}". Filter by info.base_model_id == nil for provider-only.
+    func listAdminModels() async throws -> [ModelItem] {
+        let (data, _) = try await network.requestRaw(path: "/api/models")
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["data"] as? [[String: Any]] else { return [] }
+        return items.compactMap { ModelItem(json: $0) }
     }
 
     /// GET /api/v1/models/model?id={id} — full model detail (typed wrapper)
@@ -2062,13 +2155,12 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
-    /// POST /api/v1/models/model/toggle?id={id}
+    /// POST /api/v1/models/model/toggle?id={id}  — no request body (Content-Length: 0)
     func toggleWorkspaceModel(id: String) async throws -> [String: Any] {
         try await network.requestJSON(
             path: "/api/v1/models/model/toggle",
             method: .post,
-            queryItems: [URLQueryItem(name: "id", value: id)],
-            body: [:]
+            queryItems: [URLQueryItem(name: "id", value: id)]
         )
     }
 
@@ -3989,6 +4081,10 @@ final class APIClient: @unchecked Sendable {
            let contentArr = firstOutput["content"] as? [[String: Any]] {
             content = contentArr.compactMap { $0["text"] as? String }.joined()
         }
+        // Extract any inline base64 image data URIs (called at parse time, always off main thread).
+        // Replaces ![alt](data:image/...;base64,...) with ![alt](imgcache://TOKEN)
+        // so SwiftUI never receives 500 KB strings during layout passes.
+        content = InlineImageStore.extractAndReplace(content: content)
 
         var timestamp = Date()
         if let ts = msg["timestamp"] as? Double {

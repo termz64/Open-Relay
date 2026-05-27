@@ -453,6 +453,7 @@ struct ChatDetailView: View {
         // User-configurable valves sheet (gear icon on tool rows in ToolsMenuSheet)
         .sheet(item: $toolUserValvesKind) { kind in
             UserValvesSheet(kind: kind)
+                .environment(dependencies)
                 .themed()
         }
         // In-app file preview using QuickLook (PDFs, images, docs, etc.)
@@ -471,6 +472,7 @@ struct ChatDetailView: View {
                     }
                 )
             )
+            .environment(dependencies)
             .themed()
         }
         .sheet(item: $editingModelDetail) { detail in
@@ -480,6 +482,7 @@ struct ChatDetailView: View {
                     editingModelDetail = nil
                 }
             }
+            .environment(dependencies)
             .themed()
         }
         .applyWidgetAndPickerHandlers(

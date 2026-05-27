@@ -817,7 +817,7 @@ struct KnowledgeFileEntry: Identifiable, Sendable {
 
 /// A single suggestion prompt entry matching the API format:
 /// `{"content": "prompt text", "title": ["titleText", "subtitleText"]}`
-struct SuggestionPrompt: Identifiable, Sendable {
+struct SuggestionPrompt: Identifiable, Sendable, Equatable {
     var id: String = UUID().uuidString
     var content: String
     var title: String
@@ -844,6 +844,13 @@ struct SuggestionPrompt: Identifiable, Sendable {
             "content": content,
             "title": [title, subtitle]
         ]
+    }
+
+    // Compare by content only — id is a transient UUID generated on each init
+    static func == (lhs: SuggestionPrompt, rhs: SuggestionPrompt) -> Bool {
+        lhs.content == rhs.content &&
+        lhs.title == rhs.title &&
+        lhs.subtitle == rhs.subtitle
     }
 }
 
@@ -1048,43 +1055,97 @@ struct ModelItem: Identifiable, Sendable {
     var name: String
     var description: String?
     var isActive: Bool
+    /// Whether this model is hidden from the model selector (info.meta.hidden).
+    var isHidden: Bool
     var profileImageURL: String?
     var baseModelId: String?
     var tags: [String]
     var writeAccess: Bool
     var userId: String
+    var isPublic: Bool
     var createdAt: Date?
     var updatedAt: Date?
 
     init(id: String, name: String, description: String? = nil, isActive: Bool = true,
-         profileImageURL: String? = nil, baseModelId: String? = nil, tags: [String] = [],
-         writeAccess: Bool = true, userId: String = "", createdAt: Date? = nil, updatedAt: Date? = nil) {
+         isHidden: Bool = false, profileImageURL: String? = nil, baseModelId: String? = nil,
+         tags: [String] = [], writeAccess: Bool = true, userId: String = "",
+         isPublic: Bool = false, createdAt: Date? = nil, updatedAt: Date? = nil) {
         self.id = id; self.name = name; self.description = description; self.isActive = isActive
-        self.profileImageURL = profileImageURL; self.baseModelId = baseModelId; self.tags = tags
-        self.writeAccess = writeAccess; self.userId = userId; self.createdAt = createdAt; self.updatedAt = updatedAt
+        self.isHidden = isHidden; self.profileImageURL = profileImageURL
+        self.baseModelId = baseModelId; self.tags = tags
+        self.writeAccess = writeAccess; self.userId = userId; self.isPublic = isPublic
+        self.createdAt = createdAt; self.updatedAt = updatedAt
     }
 
     init?(json: [String: Any]) {
         guard let id = json["id"] as? String, let name = json["name"] as? String else { return nil }
         self.id = id; self.name = name
-        self.isActive = json["is_active"] as? Bool ?? true
-        self.writeAccess = json["write_access"] as? Bool ?? true
-        self.userId = json["user_id"] as? String ?? ""
-        self.baseModelId = json["base_model_id"] as? String
-        let meta = json["meta"] as? [String: Any] ?? [:]
-        self.description = meta["description"] as? String
+
+        // /api/models wraps model details under "info{}".
+        // Other endpoints (/api/v1/models/base, /api/v1/models) store fields at root level.
+        let info = json["info"] as? [String: Any] ?? [:]
+
+        // Prefer info{} values, fall back to root for older endpoints
+        self.isActive   = info["is_active"]   as? Bool   ?? json["is_active"]   as? Bool   ?? true
+        self.writeAccess = info["write_access"] as? Bool  ?? json["write_access"] as? Bool  ?? true
+        self.userId     = info["user_id"]     as? String ?? json["user_id"]     as? String ?? ""
+        self.baseModelId = info["base_model_id"] as? String ?? json["base_model_id"] as? String
+
+        // isPublic: check access_grants for an entry with principal_id == "*" (same logic as web UI)
+        let grants = info["access_grants"] as? [[String: Any]] ?? []
+        self.isPublic = grants.contains { $0["principal_id"] as? String == "*" }
+
+        // meta lives at info.meta for /api/models; at root meta for /api/v1/models/base
+        let infoMeta = info["meta"] as? [String: Any] ?? [:]
+        let rootMeta = json["meta"] as? [String: Any] ?? [:]
+        let meta = infoMeta.isEmpty ? rootMeta : infoMeta
+
+        self.description    = meta["description"] as? String
+        self.isHidden       = meta["hidden"] as? Bool ?? rootMeta["hidden"] as? Bool ?? false
         self.profileImageURL = meta["profile_image_url"] as? String
+            ?? rootMeta["profile_image_url"] as? String
+
         if let tagArray = meta["tags"] as? [[String: Any]] {
             self.tags = tagArray.compactMap { $0["name"] as? String }
         } else if let tagArray = meta["tags"] as? [String] {
             self.tags = tagArray
         } else { self.tags = [] }
-        if let ts = json["created_at"] as? Double { self.createdAt = Date(timeIntervalSince1970: ts) }
-        else if let ts = json["created_at"] as? Int { self.createdAt = Date(timeIntervalSince1970: Double(ts)) }
+
+        // createdAt: /api/models uses root "created" (epoch int); others use "created_at"
+        let createdRaw: Any? = info["created_at"] ?? json["created_at"] ?? json["created"]
+        if let ts = createdRaw as? Double { self.createdAt = Date(timeIntervalSince1970: ts) }
+        else if let ts = createdRaw as? Int { self.createdAt = Date(timeIntervalSince1970: Double(ts)) }
         else { self.createdAt = nil }
-        if let ts = json["updated_at"] as? Double { self.updatedAt = Date(timeIntervalSince1970: ts) }
-        else if let ts = json["updated_at"] as? Int { self.updatedAt = Date(timeIntervalSince1970: Double(ts)) }
+
+        let updatedRaw: Any? = info["updated_at"] ?? json["updated_at"]
+        if let ts = updatedRaw as? Double { self.updatedAt = Date(timeIntervalSince1970: ts) }
+        else if let ts = updatedRaw as? Int { self.updatedAt = Date(timeIntervalSince1970: Double(ts)) }
         else { self.updatedAt = nil }
+    }
+
+    // MARK: - Avatar URL Resolution
+
+    /// Resolves the avatar URL for this model, identical to AIModel.resolveAvatarURL(baseURL:).
+    ///
+    /// Always delegates to the per-model server endpoint
+    /// `/api/v1/models/model/profile/image?id={modelId}` so the server returns the correct
+    /// custom avatar (or default favicon). External http/https profileImageURL values are
+    /// used directly. Results are cached by ImageCacheService.
+    func resolveAvatarURL(baseURL: String) -> URL? {
+        // External HTTP/HTTPS URL — use directly.
+        if let raw = profileImageURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty,
+           raw.hasPrefix("http://") || raw.hasPrefix("https://") {
+            return URL(string: raw)
+        }
+        // All other cases (nil, empty, data URI, relative path):
+        // delegate to the per-model endpoint.
+        let trimmedBase = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBase.isEmpty, !id.isEmpty else { return nil }
+        let normalizedBase = trimmedBase.hasSuffix("/") ? String(trimmedBase.dropLast()) : trimmedBase
+        var components = URLComponents(string: "\(normalizedBase)/api/v1/models/model/profile/image")
+        components?.queryItems = [URLQueryItem(name: "id", value: id)]
+        return components?.url
     }
 }
 
