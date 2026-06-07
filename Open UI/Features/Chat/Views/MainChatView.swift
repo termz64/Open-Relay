@@ -35,6 +35,9 @@ struct MainChatView: View {
     /// Controls the automations sheet presentation.
     @State private var showAutomations = false
 
+    /// Controls the My Defaults sheet presentation.
+    @State private var showUserSettings = false
+
     /// Controls the memories sheet presentation.
     @State private var showMemories = false
 
@@ -696,6 +699,12 @@ struct MainChatView: View {
             // Automations sheet
             .sheet(isPresented: $showAutomations) {
                 AutomationsListView()
+                    .environment(dependencies)
+                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+            }
+            // My Defaults sheet
+            .sheet(isPresented: $showUserSettings) {
+                UserSettingsView()
                     .environment(dependencies)
                     .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
             }
@@ -2511,6 +2520,13 @@ struct MainChatView: View {
                         } label: {
                             Label("Automations", systemImage: "clock.arrow.circlepath")
                         }
+                    }
+
+                    Button {
+                        closeDrawer()
+                        showUserSettings = true
+                    } label: {
+                        Label("My Defaults", systemImage: "slider.horizontal.3")
                     }
 
                     Divider()

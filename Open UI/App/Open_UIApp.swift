@@ -504,6 +504,149 @@ struct Open_UIApp: App {
     }
 }
 
+// MARK: - App Launch Screen
+
+/// A single floating ambient orb used in the launch screen background.
+private struct LaunchOrb: View {
+    let color: Color
+    let size: CGFloat
+    @State private var offset: CGSize = .zero
+    @State private var opacity: Double = 0
+
+    var body: some View {
+        Circle()
+            .fill(color.opacity(opacity))
+            .frame(width: size, height: size)
+            .blur(radius: size * 0.4)
+            .offset(offset)
+            .onAppear {
+                let randomX = CGFloat.random(in: -120...120)
+                let randomY = CGFloat.random(in: -120...120)
+                withAnimation(.easeInOut(duration: Double.random(in: 6...10)).repeatForever(autoreverses: true)) {
+                    offset = CGSize(width: randomX, height: randomY)
+                }
+                withAnimation(.easeInOut(duration: 2)) {
+                    opacity = Double.random(in: 0.15...0.35)
+                }
+            }
+    }
+}
+
+/// Animated launch screen shown during app startup (session validation / restore).
+/// Fades away smoothly to reveal the chat view underneath — no jarring swap.
+private struct AppLaunchView: View {
+    @Environment(\.theme) private var theme
+
+    // Pulse animation state
+    @State private var pulse = false
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+
+            // Ambient floating orbs
+            LaunchOrb(color: theme.brandPrimary, size: 200)
+                .offset(x: -80, y: -200)
+            LaunchOrb(color: theme.brandPrimary.opacity(0.6), size: 160)
+                .offset(x: 100, y: -100)
+            LaunchOrb(color: theme.brandPrimary.opacity(0.4), size: 120)
+                .offset(x: -60, y: 180)
+            LaunchOrb(color: theme.info.opacity(0.3), size: 140)
+                .offset(x: 80, y: 250)
+
+            // Centered logo with pulsing rings
+            VStack(spacing: 28) {
+                ZStack {
+                    // Outer pulsing ring
+                    Circle()
+                        .stroke(theme.brandPrimary.opacity(0.15), lineWidth: 1.5)
+                        .frame(width: pulse ? 160 : 130, height: pulse ? 160 : 130)
+                        .animation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true), value: pulse)
+
+                    // Inner pulsing ring
+                    Circle()
+                        .stroke(theme.brandPrimary.opacity(0.25), lineWidth: 1.5)
+                        .frame(width: pulse ? 128 : 110, height: pulse ? 128 : 110)
+                        .animation(.easeInOut(duration: 1.6).delay(0.2).repeatForever(autoreverses: true), value: pulse)
+
+                    // Solid background circle
+                    Circle()
+                        .fill(theme.brandPrimary.opacity(0.08))
+                        .frame(width: 100, height: 100)
+
+                    // App icon
+                    Image("AppIconImage")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 72, height: 72)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+
+                // App name
+                Text("Open Relay")
+                    .scaledFont(size: 28, weight: .bold, design: .rounded)
+                    .foregroundStyle(theme.textPrimary)
+            }
+        }
+        .onAppear {
+            pulse = true
+        }
+    }
+}
+
+/// Launch screen that shows error + retry when session restore fails.
+private struct AppLaunchErrorView: View {
+    let error: String
+    let onRetry: () -> Void
+    let onSwitchAccount: () -> Void
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+
+            LaunchOrb(color: theme.brandPrimary, size: 200)
+                .offset(x: -80, y: -200)
+            LaunchOrb(color: theme.brandPrimary.opacity(0.4), size: 120)
+                .offset(x: -60, y: 180)
+
+            VStack(spacing: 20) {
+                Image(systemName: "wifi.exclamationmark")
+                    .font(.system(size: 44))
+                    .foregroundStyle(theme.textTertiary)
+
+                Text("Connection Issue")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(theme.textPrimary)
+
+                Text(error)
+                    .font(.subheadline)
+                    .foregroundStyle(theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+
+                Button(action: onRetry) {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                        .font(.body.weight(.medium))
+                        .frame(minWidth: 140)
+                        .frame(height: 50)
+                        .foregroundStyle(theme.buttonPrimaryText)
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(theme.buttonPrimary)
+                )
+                .padding(.top, 4)
+
+                Button("Sign in with different account", action: onSwitchAccount)
+                    .font(.footnote)
+                    .foregroundStyle(theme.textTertiary)
+                    .padding(.top, 2)
+            }
+        }
+    }
+}
+
 /// Root view that manages the full authentication flow using a phase-based state machine.
 struct RootView: View {
     @Environment(AppDependencyContainer.self) private var dependencies
@@ -512,142 +655,178 @@ struct RootView: View {
     @State private var showSettings = false
     @State private var hasAttemptedRestore = false
 
+    // Launch overlay — starts visible for any startup path that needs validation.
+    // Set to true only when we begin from an authenticated/restoring phase (i.e. a
+    // saved session exists). Fades out smoothly once validation/restore is complete.
+    @State private var launchOverlayVisible: Bool
+    // Separate opacity so we can animate the fade independently of visibility.
+    @State private var launchOverlayOpacity: Double
+
+    init() {
+        // We need to decide at init time (before the view mounts) whether to
+        // show the launch overlay. If the app is starting into an auth-needing
+        // state (serverConnection, authMethodSelection etc.) we skip it.
+        // Only optimistic-auth and restoring-session paths need it.
+        // We can't access @Environment here, so we peek at the raw UserDefaults/
+        // Keychain state. The easiest proxy is to check the ServerConfigStore directly.
+        let store = ServerConfigStore()
+        let needsOverlay: Bool
+        if let active = store.activeServer {
+            needsOverlay = KeychainService.shared.hasToken(forServer: active.url)
+        } else {
+            needsOverlay = false
+        }
+        _launchOverlayVisible = State(initialValue: needsOverlay)
+        _launchOverlayOpacity = State(initialValue: needsOverlay ? 1.0 : 0.0)
+    }
+
     private var viewModel: AuthViewModel {
         dependencies.authViewModel
     }
 
     var body: some View {
-        Group {
-            switch viewModel.phase {
-            case .serverConnection:
-                ServerConnectionView(viewModel: viewModel)
+        ZStack {
+            // ── Background layer: the full phase-based content ──
+            phaseContent
+                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: viewModel.phase)
 
-            case .restoringSession:
-                // Show a lightweight loading/retry screen while validating the saved token
-                sessionRestoringView
-
-            case .authMethodSelection:
-                NavigationStack {
-                    AuthMethodSelectionView(viewModel: viewModel)
-                }
-
-            case .credentialLogin:
-                NavigationStack {
-                    LoginView(viewModel: viewModel)
-                }
-
-            case .signUp:
-                NavigationStack {
-                    SignUpView(viewModel: viewModel)
-                }
-
-            case .pendingApproval:
-                PendingApprovalView(viewModel: viewModel)
-
-            case .ldapLogin:
-                NavigationStack {
-                    LDAPLoginView(viewModel: viewModel)
-                }
-
-            case .ssoLogin:
-                NavigationStack {
-                    SSOAuthView(viewModel: viewModel)
-                }
-
-            case .authenticated:
-                authenticatedContent
-
-            case .serverSwitcher:
-                NavigationStack {
-                    ScrollView {
-                        SavedServersView(viewModel: viewModel, showAddServerButton: true)
-                    }
-                    .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-                    .navigationTitle("Switch Server")
-                    .navigationBarTitleDisplayMode(.inline)
-                }
+            // ── Foreground layer: launch overlay (fades out on top) ──
+            if launchOverlayVisible {
+                launchOverlay
+                    .opacity(launchOverlayOpacity)
+                    .ignoresSafeArea()
+                    // Disable interaction once fading so the chat underneath is tappable
+                    .allowsHitTesting(launchOverlayOpacity > 0.05)
             }
         }
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: viewModel.phase)
         .task {
-            // Migrate single-token-per-server to multi-account structure (one-time).
             viewModel.runLegacyMigrationIfNeeded()
 
             guard !hasAttemptedRestore else { return }
             hasAttemptedRestore = true
 
-            guard dependencies.serverConfigStore.activeServer != nil else { return }
+            guard dependencies.serverConfigStore.activeServer != nil else {
+                dismissLaunchOverlay()
+                return
+            }
 
             switch viewModel.phase {
             case .authenticated:
-                // Optimistic auth — user is already seeing the chat screen.
-                // Validate the token silently in the background.
+                // Optimistic auth — chat view is already rendered underneath the overlay.
+                // Validate token silently, then fade the overlay away.
                 await viewModel.validateSessionInBackground()
+                dismissLaunchOverlay()
             case .restoringSession:
-                // Have token but no cached user — must validate before showing chat.
+                // Have token but no cached user — restore first, then fade away.
                 await viewModel.restoreSession()
+                // Only dismiss if restore succeeded (phase changed to .authenticated).
+                // If it failed, errorMessage will be set and overlay shows the error UI.
+                if viewModel.phase == .authenticated {
+                    dismissLaunchOverlay()
+                }
+                // Error path: overlay stays visible and switches to the error UI.
             case .authMethodSelection:
-                // Signed out but server is saved — fetch backend config so that
-                // login/SSO options are populated correctly without requiring a reconnect.
                 await viewModel.fetchBackendConfigIfNeeded()
+                dismissLaunchOverlay()
             default:
-                break
+                dismissLaunchOverlay()
             }
         }
     }
 
-    /// Loading / retry view shown while restoring a saved session.
-    ///
-    /// When `AuthViewModel.restoreSession()` fails due to a transient error
-    /// (network down, 502, etc.) it stays in `.restoringSession` phase and
-    /// sets `errorMessage`. This view shows a retry button so the user can
-    /// try again without re-entering credentials.
-    private var sessionRestoringView: some View {
-        VStack(spacing: 20) {
-            if let error = viewModel.errorMessage {
-                // Connection failed — show error + retry
-                Image(systemName: "wifi.exclamationmark")
-                    .scaledFont(size: 44)
-                    .foregroundStyle(.secondary)
+    /// Fades the launch overlay out smoothly.
+    private func dismissLaunchOverlay() {
+        withAnimation(.easeInOut(duration: 0.45)) {
+            launchOverlayOpacity = 0.0
+        }
+        // Remove from hierarchy after the fade completes to avoid blocking touches.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            launchOverlayVisible = false
+        }
+    }
 
-                Text("Connection Issue")
-                    .font(.title3.weight(.semibold))
+    // MARK: - Launch Overlay Content
 
-                Text(error)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
-
-                Button {
-                    Task {
-                        await viewModel.retrySessionRestore()
+    @ViewBuilder
+    private var launchOverlay: some View {
+        if let error = viewModel.errorMessage, viewModel.phase == .restoringSession {
+            // Session restore failed — show error + retry inside the overlay.
+            AppLaunchErrorView(
+                error: error,
+                onRetry: {
+                    Task { await viewModel.retrySessionRestore()
+                        if viewModel.phase == .authenticated {
+                            dismissLaunchOverlay()
+                        }
                     }
-                } label: {
-                    Label("Retry", systemImage: "arrow.clockwise")
-                        .font(.body.weight(.medium))
-                        .frame(minWidth: 120)
-                }
-                .buttonStyle(.borderedProminent)
-                .padding(.top, 4)
-
-                Button("Sign in with different account") {
+                },
+                onSwitchAccount: {
                     viewModel.errorMessage = nil
                     viewModel.phase = .authMethodSelection
+                    dismissLaunchOverlay()
                 }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .padding(.top, 2)
-            } else {
-                // Normal loading state
-                ProgressView()
-                    .controlSize(.large)
-                Text("Connecting...")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+            )
+            .transition(.opacity)
+        } else {
+            AppLaunchView()
+                .transition(.opacity)
+        }
+    }
+
+    // MARK: - Phase Content
+
+    @ViewBuilder
+    private var phaseContent: some View {
+        switch viewModel.phase {
+        case .serverConnection:
+            ServerConnectionView(viewModel: viewModel)
+
+        case .restoringSession:
+            // Render authenticated content behind the overlay so it's ready when overlay fades.
+            // If there's an error (after retries exhausted), the overlay shows the error UI.
+            authenticatedContent
+
+        case .authMethodSelection:
+            NavigationStack {
+                AuthMethodSelectionView(viewModel: viewModel)
+            }
+
+        case .credentialLogin:
+            NavigationStack {
+                LoginView(viewModel: viewModel)
+            }
+
+        case .signUp:
+            NavigationStack {
+                SignUpView(viewModel: viewModel)
+            }
+
+        case .pendingApproval:
+            PendingApprovalView(viewModel: viewModel)
+
+        case .ldapLogin:
+            NavigationStack {
+                LDAPLoginView(viewModel: viewModel)
+            }
+
+        case .ssoLogin:
+            NavigationStack {
+                SSOAuthView(viewModel: viewModel)
+            }
+
+        case .authenticated:
+            authenticatedContent
+
+        case .serverSwitcher:
+            NavigationStack {
+                ScrollView {
+                    SavedServersView(viewModel: viewModel, showAddServerButton: true)
+                }
+                .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+                .navigationTitle("Switch Server")
+                .navigationBarTitleDisplayMode(.inline)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass

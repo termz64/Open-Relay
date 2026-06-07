@@ -1155,6 +1155,27 @@ final class APIClient: @unchecked Sendable {
         try await updateUserSettings(["ui": existingUI])
     }
 
+    /// Fetches and parses the user-level default params from `GET /api/v1/users/user/settings`.
+    /// Reads `ui.system` (system prompt) and `ui.params` (advanced params).
+    func fetchUserDefaultParams() async throws -> UserDefaultParams {
+        let settings = try await getUserSettings()
+        let ui = settings["ui"] as? [String: Any] ?? [:]
+        return UserDefaultParams(from: ui)
+    }
+
+    /// Saves user-level default params to `POST /api/v1/users/user/settings/update`.
+    /// Merges only `system` and `params` keys into the existing `ui` dict so other
+    /// ui settings (models, pinnedModels, version, audio, etc.) are preserved.
+    func saveUserDefaultParams(_ params: UserDefaultParams) async throws {
+        let current = try await getUserSettings()
+        var existingUI = (current["ui"] as? [String: Any]) ?? [:]
+        let updates = params.toUISaveDict()
+        for (key, value) in updates {
+            existingUI[key] = value
+        }
+        try await updateUserSettings(["ui": existingUI])
+    }
+
     // MARK: - Folders
 
     /// Returns `(folders, featureEnabled)`. Returns `enabled: false` on 403.

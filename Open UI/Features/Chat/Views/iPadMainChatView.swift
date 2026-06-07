@@ -50,6 +50,9 @@ struct iPadMainChatView: View {
     /// Whether the automations sheet is visible.
     @State private var showAutomations = false
 
+    /// Controls the My Defaults sheet presentation.
+    @State private var showUserSettings = false
+
     /// Controls column visibility for the NavigationSplitView.
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
@@ -321,6 +324,12 @@ struct iPadMainChatView: View {
                 .environment(dependencies)
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
         }
+        // My Defaults sheet
+        .sheet(isPresented: $showUserSettings) {
+            UserSettingsView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+        }
         .overlay {
             if isExporting {
                 exportingOverlay
@@ -348,6 +357,7 @@ struct iPadMainChatView: View {
             showMemories: $showMemories,
             showCalendar: $showCalendar,
             showAutomations: $showAutomations,
+            showUserSettings: $showUserSettings,
             showAdminConsole: $showAdminConsole,
             showDeleteAllConfirmation: $showDeleteAllConfirmation,
             showDeleteSelectedConfirmation: $showDeleteSelectedConfirmation,
@@ -705,6 +715,7 @@ struct iPadSidebarContent: View {
     @Binding var showMemories: Bool
     @Binding var showCalendar: Bool
     @Binding var showAutomations: Bool
+    @Binding var showUserSettings: Bool
     @Binding var showAdminConsole: Bool
     @Binding var showDeleteAllConfirmation: Bool
     @Binding var showDeleteSelectedConfirmation: Bool
@@ -1731,6 +1742,10 @@ struct iPadSidebarContent: View {
                         Button { showAutomations = true } label: {
                             Label("Automations", systemImage: "clock.arrow.circlepath")
                         }
+                    }
+
+                    Button { showUserSettings = true } label: {
+                        Label("My Defaults", systemImage: "slider.horizontal.3")
                     }
 
                     Divider()

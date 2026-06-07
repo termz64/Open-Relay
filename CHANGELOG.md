@@ -1,5 +1,15 @@
 # Changelog
 
+## v4.9.3 — June 6, 2026
+
+### What's New
+- Added My Defaults settings to customize account level system prompt and advanced parameters.
+
+### Improvements
+- Improved the animation on app launch
+
+### Bug Fixes
+
 ## v4.9.2 — June 4, 2026
 
 ### What's New

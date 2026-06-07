@@ -4765,6 +4765,7 @@ final class ChatViewModel {
         // value is cached for when a capable model is selected later.
         Task { await fetchMemorySettingFromServer() }
         Task { await fetchMessageQueueSettingFromServer() }
+        Task { await fetchUserDefaultParamsFromServer() }
 
         // Reset and re-populate tool selections for this model.
         // Clear first so tools from a previous model don't persist.
@@ -4863,6 +4864,27 @@ final class ChatViewModel {
             } catch {
                 logger.debug("Failed to save message queue setting: \(error.localizedDescription)")
             }
+        }
+    }
+
+    // MARK: - User Default Params
+
+    /// Fetches the user's default params (`ui.system` + `ui.params`) from the server.
+    /// Uses session-level cache so the GET is called at most once per session.
+    /// These are stored by `UserSettingsView` and applied server-side; the client
+    /// does NOT inject them into chat requests — the server handles that automatically.
+    func fetchUserDefaultParamsFromServer() async {
+        if activeChatStore?.cachedUserDefaultParams != nil {
+            // Already cached — nothing to do
+            return
+        }
+        guard let apiClient = manager?.apiClient else { return }
+        do {
+            let params = try await apiClient.fetchUserDefaultParams()
+            activeChatStore?.cachedUserDefaultParams = params
+            logger.debug("User default params fetched from server (hasOverride=\(params.hasAnyOverride))")
+        } catch {
+            logger.debug("Failed to fetch user default params: \(error.localizedDescription)")
         }
     }
 
@@ -4972,14 +4994,18 @@ final class ChatViewModel {
         await modelConfigTask?.value
 
         // Build request params: chat-level overrides + system prompt + function_calling
-        var params: [String: Any] = [:]
+        // Priority: per-chat params > user My Defaults params
+        var params: [String: Any] = activeChatStore?.cachedUserDefaultParams?.toRequestParams() ?? [:]
         if let chatP = conversation?.chatParams {
             params = chatP.mergedOver(base: params)
         }
         let effectiveSP: String? = {
             if let cp = conversation?.chatParams?.systemPrompt,
                !cp.trimmingCharacters(in: .whitespaces).isEmpty { return cp }
-            return conversation?.systemPrompt
+            // Fallback to user My Defaults system prompt
+            if let dp = activeChatStore?.cachedUserDefaultParams?.systemPrompt,
+               !dp.trimmingCharacters(in: .whitespaces).isEmpty { return dp }
+            return nil
         }()
         if let sp = effectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
             params["system"] = sp
@@ -5104,7 +5130,9 @@ final class ChatViewModel {
         let simpleEffectiveSP: String? = {
             if let cp = conversation.chatParams?.systemPrompt,
                !cp.trimmingCharacters(in: .whitespaces).isEmpty { return cp }
-            return conversation.systemPrompt
+            if let dp = activeChatStore?.cachedUserDefaultParams?.systemPrompt,
+               !dp.trimmingCharacters(in: .whitespaces).isEmpty { return dp }
+            return nil
         }()
         if let sp = simpleEffectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
             msgs.append(["role": "system", "content": sp])
@@ -5121,7 +5149,9 @@ final class ChatViewModel {
         let asyncEffectiveSP: String? = {
             if let cp = conversation.chatParams?.systemPrompt,
                !cp.trimmingCharacters(in: .whitespaces).isEmpty { return cp }
-            return conversation.systemPrompt
+            if let dp = activeChatStore?.cachedUserDefaultParams?.systemPrompt,
+               !dp.trimmingCharacters(in: .whitespaces).isEmpty { return dp }
+            return nil
         }()
         if let sp = asyncEffectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
             apiMessages.append(["role": "system", "content": sp])
