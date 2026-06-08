@@ -2,9 +2,44 @@ import UIKit
 import SwiftUI
 import MarkdownView
 import Charts
+import Photos
 import os.log
 
 private let vizLog = Logger(subsystem: "com.openui", category: "VizPipeline")
+
+// MARK: - Photos Permission Helper
+
+/// Requests `.addOnly` Photos authorization if needed, then saves the image.
+/// On first call the system permission prompt appears automatically.
+/// If the user previously denied access, `onDenied` is called on the main thread
+/// so the caller can show an alert directing them to Settings.
+func saveImageWithPermission(_ image: UIImage, onDenied: @escaping () -> Void) {
+    let current = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+    switch current {
+    case .authorized, .limited:
+        UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+    case .notDetermined:
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            DispatchQueue.main.async {
+                if status == .authorized || status == .limited {
+                    UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+                } else {
+                    onDenied()
+                }
+            }
+        }
+    case .denied, .restricted:
+        DispatchQueue.main.async { onDenied() }
+    @unknown default:
+        DispatchQueue.main.async { onDenied() }
+    }
+}
+
+/// Opens the app's page in the iOS Settings app so the user can grant Photos access.
+func openPhotosSettings() {
+    guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+    UIApplication.shared.open(url)
+}
 
 // MARK: - Streaming Markdown View
 
@@ -1024,6 +1059,8 @@ private struct MarkdownInlineImageView: View {
     @State private var loadedRemoteImage: UIImage? = nil
     // Feedback toast for save-to-photos action.
     @State private var savedToPhotos = false
+    // Alert shown when Photos access was previously denied.
+    @State private var showPhotosDeniedAlert = false
 
     // ── Base64 async decode state ──────────────────────────────────────────
     // The decode (base64 + UIImage decompress) runs off the main thread so it
@@ -1225,7 +1262,7 @@ private struct MarkdownInlineImageView: View {
     @ViewBuilder
     private func imageContextMenu(for image: UIImage) -> some View {
         Button {
-            UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+            saveImageWithPermission(image, onDenied: { showPhotosDeniedAlert = true })
         } label: {
             Label("Save to Photos", systemImage: "square.and.arrow.down")
         }
@@ -1409,7 +1446,10 @@ private struct FullscreenImageViewer: View {
     }
 
     private func saveToPhotos(_ uiImage: UIImage) {
-        UIImageWriteToSavedPhotosAlbum(uiImage, nil, nil, nil)
+        saveImageWithPermission(uiImage) {
+            // Permission denied — open Settings so the user can enable it.
+            openPhotosSettings()
+        }
         withAnimation(.spring()) { savedConfirmation = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             withAnimation { savedConfirmation = false }

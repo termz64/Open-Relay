@@ -1,5 +1,13 @@
 # Changelog
 
+## v4.10 — June 8, 2026
+
+### What's New
+- Added "Using Entire Document" toggle in the file attachment preview — tap a file pill to choose between Focused Retrieval (default) or sending the full document content inline.
+
+### Bug Fixes
+- Fixed "Save to Photos" silently doing nothing — the app now requests Photos permission on first save and opens Settings if access was previously denied.
+
 ## v4.9.3 — June 6, 2026
 
 ### What's New

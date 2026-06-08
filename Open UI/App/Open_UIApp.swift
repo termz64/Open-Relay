@@ -3,6 +3,7 @@ import WidgetKit
 import BackgroundTasks
 import UIKit
 import AVFoundation
+import Photos
 
 // MLX is always present when either audio framework is linked.
 // Import it unconditionally so we can set Memory.cacheLimit at startup
@@ -238,6 +239,15 @@ struct Open_UIApp: App {
                     // Wire notification tap to router
                     NotificationService.shared.onOpenChat = { conversationId in
                         router.navigate(to: .chatDetail(conversationId: conversationId))
+                    }
+
+                    // Request Photos "add-only" permission at startup so that
+                    // "Save to Photos" works the first time a user taps it.
+                    // Uses .addOnly (not .readWrite) — we only ever write to Photos,
+                    // never read the library. If already granted/denied, this is a no-op.
+                    let photosStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+                    if photosStatus == .notDetermined {
+                        _ = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
                     }
                 }
                 .onOpenURL { url in

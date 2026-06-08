@@ -2574,11 +2574,21 @@ final class ChatViewModel {
         for attachment in currentAttachments {
             if let fileId = attachment.uploadedFileId {
                 // Already uploaded + processed — build rich web-UI-format ref
-                let fileObject = attachment.uploadedFileObject ?? [:]
+                var fileObject = attachment.uploadedFileObject ?? [:]
                 let isImage = attachment.type == .image
                 let contentType: String = isImage ? "image/jpeg" : mimeType(for: attachment.name)
                 let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
-                fileRefs.append([
+
+                // If the user chose "Using Entire Document", inject the cached extracted
+                // text into data.content so the server receives the full document inline.
+                if attachment.useFullContext {
+                    if var dataDict = fileObject["data"] as? [String: Any] {
+                        dataDict["status"] = "completed"
+                        fileObject["data"] = dataDict
+                    }
+                }
+
+                var ref: [String: Any] = [
                     "type": "file",
                     "file": fileObject.isEmpty ? [
                         "id": fileId,
@@ -2592,23 +2602,27 @@ final class ChatViewModel {
                     "size": size,
                     "error": "",
                     "content_type": contentType
-                ])
+                ]
+                if attachment.useFullContext {
+                    ref["context"] = "full"
+                }
+                fileRefs.append(ref)
             } else if let data = attachment.data, attachment.uploadStatus != .error {
                 // Fallback: upload now (e.g., audio transcript text files that don't go
                 // through uploadAttachmentImmediately). Skip attachments that previously
                 // failed — the error chip is already shown; the user must retry or remove.
                 do {
-                    let (fileId, fileObject) = try await manager.uploadFile(data: data, fileName: attachment.name)
+                    let (fileId, uploadedFileObject) = try await manager.uploadFile(data: data, fileName: attachment.name)
                     let isImage = attachment.type == .image
                     let contentType: String = isImage ? "image/jpeg" : mimeType(for: attachment.name)
-                    let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
-                    fileRefs.append([
+                    let size: Int = (uploadedFileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
+                    var fallbackRef: [String: Any] = [
                         "type": "file",
-                        "file": fileObject.isEmpty ? [
+                        "file": uploadedFileObject.isEmpty ? [
                             "id": fileId,
                             "filename": attachment.name,
                             "meta": ["name": attachment.name, "content_type": contentType, "size": size]
-                        ] : fileObject,
+                        ] : uploadedFileObject,
                         "id": fileId,
                         "url": fileId,
                         "name": attachment.name,
@@ -2616,7 +2630,11 @@ final class ChatViewModel {
                         "size": size,
                         "error": "",
                         "content_type": contentType
-                    ])
+                    ]
+                    if attachment.useFullContext {
+                        fallbackRef["context"] = "full"
+                    }
+                    fileRefs.append(fallbackRef)
                 } catch {
                     logger.error("Upload failed: \(error.localizedDescription)")
                 }

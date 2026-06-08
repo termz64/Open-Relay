@@ -5,6 +5,10 @@ import PDFKit
 
 // MARK: - Chat Attachment
 
+private struct AttachmentID: Identifiable {
+    let id: UUID
+}
+
 struct ChatAttachment: Identifiable {
     let id = UUID()
     let type: AttachmentType
@@ -29,6 +33,11 @@ struct ChatAttachment: Identifiable {
     /// The full server-response object returned by the files API after upload.
     /// Used to build rich file references matching the web UI payload format.
     var uploadedFileObject: [String: Any]?
+
+    /// When `true`, the full extracted text is injected into the request payload
+    /// (`data.content`) and `"context": "full"` is added to the file ref.
+    /// When `false` (default), focused RAG retrieval is used.
+    var useFullContext: Bool = false
 
     /// Error message if upload or processing failed.
     var uploadError: String?
@@ -151,7 +160,7 @@ struct ChatInputField: View {
     /// UI chrome scale (buttons, icons, touch targets) — mirrors AccessibilityManager.uiScale.
     private var uiScale: CGFloat { accessibilityScale.scale(for: .ui) }
     @State private var showToolsSheet = false
-    @State private var previewingAttachment: ChatAttachment? = nil
+    @State private var previewingAttachmentId: AttachmentID? = nil
 
     /// Quick pills preference from UserDefaults
     @AppStorage("quickPills") private var quickPillsData: String = ""
@@ -278,8 +287,8 @@ struct ChatInputField: View {
             if isPresented { onToolsSheetPresented?() }
         }
         .animation(.easeOut(duration: 0.2), value: attachments.count)
-        .sheet(item: $previewingAttachment) { attachment in
-            AttachmentPreviewSheet(attachment: attachment)
+        .sheet(item: $previewingAttachmentId) { wrapper in
+            AttachmentPreviewSheet(attachments: $attachments, attachmentId: wrapper.id)
         }
     }
 
@@ -996,7 +1005,7 @@ struct ChatInputField: View {
                         .onTapGesture {
                             guard !attachment.isUploading else { return }
                             Haptics.play(.light)
-                            previewingAttachment = attachment
+                            previewingAttachmentId = AttachmentID(id: attachment.id)
                         }
                 } else if attachment.type == .audio {
                     // Determine audio mode: server or on-device
@@ -1080,7 +1089,7 @@ struct ChatInputField: View {
                         .onTapGesture {
                             guard !attachment.isUploading else { return }
                             Haptics.play(.light)
-                            previewingAttachment = attachment
+                            previewingAttachmentId = AttachmentID(id: attachment.id)
                         }
                 } else {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -1115,7 +1124,7 @@ struct ChatInputField: View {
                         .onTapGesture {
                             guard !attachment.isUploading else { return }
                             Haptics.play(.light)
-                            previewingAttachment = attachment
+                            previewingAttachmentId = AttachmentID(id: attachment.id)
                         }
                 }
             }
@@ -1169,9 +1178,15 @@ private struct QuickPill: Identifiable {
 /// Universal preview sheet for any attachment type.
 /// - **Image**: shows a zoomable full-size preview from the thumbnail or data.
 /// - **Audio**: shows the transcribed text (same as old TranscriptPreviewSheet).
-/// - **File**: shows extracted content tab + original file preview tab (PDF or text).
+/// - **File**: shows extracted content tab + original file preview tab (PDF or text),
+///   plus a "Using Focused Retrieval" toggle that controls whether full document context
+///   is injected into the send payload.
 struct AttachmentPreviewSheet: View {
-    let attachment: ChatAttachment
+    /// Binding to the full attachments array so we can write `useFullContext` back.
+    @Binding var attachments: [ChatAttachment]
+    /// ID of the attachment being previewed.
+    let attachmentId: UUID
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @Environment(AppDependencyContainer.self) private var dependencies
@@ -1190,6 +1205,18 @@ struct AttachmentPreviewSheet: View {
     enum FilePreviewTab: String, CaseIterable {
         case content = "Content"
         case preview = "Preview"
+    }
+
+    /// Convenience accessor — returns the current attachment from the binding.
+    private var attachment: ChatAttachment {
+        attachments.first(where: { $0.id == attachmentId }) ?? ChatAttachment(
+            type: .file, name: "Unknown"
+        )
+    }
+
+    /// Index into the binding array, used for mutations.
+    private var attachmentIndex: Int? {
+        attachments.firstIndex(where: { $0.id == attachmentId })
     }
 
     var body: some View {
@@ -1245,8 +1272,8 @@ struct AttachmentPreviewSheet: View {
         do {
             let info = try await apiClient.getFileInfo(id: fileId)
             // Parse data.content (extracted text)
-            if let data = info["data"] as? [String: Any],
-               let content = data["content"] as? String {
+            if let dataDict = info["data"] as? [String: Any],
+               let content = dataDict["content"] as? String {
                 extractedContent = content
                 extractedLineCount = content.components(separatedBy: "\n").count
             }
@@ -1259,7 +1286,6 @@ struct AttachmentPreviewSheet: View {
             }
         } catch {
             loadError = error.localizedDescription
-            // Fall back to local data size
             if let localData = attachment.data {
                 fileSize = Int64(localData.count)
             }
@@ -1354,12 +1380,9 @@ struct AttachmentPreviewSheet: View {
     @ViewBuilder
     private var filePreviewWithTabs: some View {
         VStack(spacing: 0) {
-            // Header: file metadata
             fileMetaHeader
-
             Divider()
 
-            // Tab selector
             Picker("Tab", selection: $selectedTab) {
                 ForEach(FilePreviewTab.allCases, id: \.self) { tab in
                     Text(tab.rawValue).tag(tab)
@@ -1371,7 +1394,6 @@ struct AttachmentPreviewSheet: View {
 
             Divider()
 
-            // Tab content
             if selectedTab == .content {
                 contentTab
             } else {
@@ -1383,46 +1405,82 @@ struct AttachmentPreviewSheet: View {
     // MARK: - File Meta Header
 
     private var fileMetaHeader: some View {
-        HStack(spacing: 12) {
-            Image(systemName: fileIcon)
-                .scaledFont(size: 28)
-                .foregroundStyle(theme.brandPrimary)
-                .frame(width: 40)
+        VStack(alignment: .leading, spacing: 10) {
+            // Top row: icon + file info
+            HStack(spacing: 12) {
+                Image(systemName: fileIcon)
+                    .scaledFont(size: 28)
+                    .foregroundStyle(theme.brandPrimary)
+                    .frame(width: 40)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(attachment.name)
-                    .scaledFont(size: 14, weight: .semibold)
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(attachment.name)
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
 
-                HStack(spacing: 6) {
-                    if fileSize > 0 {
-                        Text(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))
-                            .scaledFont(size: 12)
-                            .foregroundStyle(theme.textTertiary)
+                    HStack(spacing: 6) {
+                        if fileSize > 0 {
+                            Text(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))
+                                .scaledFont(size: 12)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+                        if extractedLineCount > 0 {
+                            Text("•")
+                                .scaledFont(size: 12)
+                                .foregroundStyle(theme.textTertiary)
+                            Text("\(extractedLineCount) Extracted Lines")
+                                .scaledFont(size: 12)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+                        if isLoadingContent {
+                            ProgressView().controlSize(.mini)
+                        }
                     }
-                    if extractedLineCount > 0 {
-                        Text("•")
-                            .scaledFont(size: 12)
+
+                    if extractedContent != nil {
+                        Text("Formatting may be inconsistent from source.")
+                            .scaledFont(size: 11)
                             .foregroundStyle(theme.textTertiary)
-                        Text("\(extractedLineCount) Extracted Lines")
-                            .scaledFont(size: 12)
-                            .foregroundStyle(theme.textTertiary)
-                    }
-                    if isLoadingContent {
-                        ProgressView().controlSize(.mini)
+                            .italic()
                     }
                 }
 
-                if extractedContent != nil {
-                    Text("Formatting may be inconsistent from source.")
-                        .scaledFont(size: 11)
-                        .foregroundStyle(theme.textTertiary)
-                        .italic()
-                }
+                Spacer()
             }
 
-            Spacer()
+            // Toggle row — only shown once file is ready
+            if attachment.isReady {
+                HStack {
+                    Spacer()
+                    Text(attachment.useFullContext ? "Using Entire Document" : "Using Focused Retrieval")
+                        .scaledFont(size: 12)
+                        .foregroundStyle(theme.textSecondary)
+                    Toggle("", isOn: Binding(
+                        get: { attachment.useFullContext },
+                        set: { newValue in
+                            guard let idx = attachmentIndex else { return }
+                            attachments[idx].useFullContext = newValue
+                            // When switching to "Entire Document", cache the
+                            // extracted text in the file object so ChatViewModel
+                            // can inject it into the payload without an extra fetch.
+                            if newValue, let content = extractedContent {
+                                if attachments[idx].uploadedFileObject == nil {
+                                    attachments[idx].uploadedFileObject = [:]
+                                }
+                                var fileObj = attachments[idx].uploadedFileObject ?? [:]
+                                var dataDict = fileObj["data"] as? [String: Any] ?? [:]
+                                dataDict["content"] = content
+                                fileObj["data"] = dataDict
+                                attachments[idx].uploadedFileObject = fileObj
+                            }
+                            Haptics.play(.light)
+                        }
+                    ))
+                    .labelsHidden()
+                    .tint(theme.brandPrimary)
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -1470,7 +1528,6 @@ struct AttachmentPreviewSheet: View {
     @ViewBuilder
     private var previewTab: some View {
         let ext = (attachment.name as NSString).pathExtension.lowercased()
-        // Prefer locally-held data, fall back to server-downloaded bytes.
         let effectiveData = attachment.data ?? downloadedFileData
         if isLoadingPreview {
             VStack {
@@ -1539,5 +1596,3 @@ private struct PDFKitView: UIViewRepresentable {
     }
 }
 
-/// Backward-compatible alias so existing call sites still compile.
-typealias TranscriptPreviewSheet = AttachmentPreviewSheet

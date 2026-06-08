@@ -1,5 +1,6 @@
 import SwiftUI
 import MarkdownView
+import Photos
 
 // MARK: - Python Code Block View
 
@@ -278,7 +279,9 @@ struct PythonCodeBlockView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 .contextMenu {
                                     Button {
-                                        UIImageWriteToSavedPhotosAlbum(uiImage, nil, nil, nil)
+                                        saveImageWithPermission(uiImage) {
+                                            openPhotosSettings()
+                                        }
                                         Haptics.notify(.success)
                                     } label: {
                                         Label("Save to Photos", systemImage: "photo")
