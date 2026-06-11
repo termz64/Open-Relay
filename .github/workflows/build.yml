@@ -1,0 +1,39 @@
+name: Build Open-Relay IPA
+
+on:
+  workflow_dispatch: # This allows you to trigger the build manually
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Xcode Project
+        run: |
+          xcodebuild clean build \
+            -project "Open UI.xcodeproj" \
+            -scheme "Open UI" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package into IPA
+        run: |
+          mkdir Payload
+          # Moves the compiled app into the Payload folder
+          mv build/Build/Products/Release-iphoneos/*.app Payload/
+          # Zips it into the standard iOS app format
+          zip -qr Open-Relay.ipa Payload
+          
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Open-Relay-IPA
+          path: Open-Relay.ipa
